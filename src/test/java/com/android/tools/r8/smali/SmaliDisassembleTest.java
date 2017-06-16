@@ -68,7 +68,9 @@ public class SmaliDisassembleTest extends SmaliTestBase {
             "    mul-int/2addr       v2, v1\n" +
             "    div-int/2addr       v3, v2\n" +
             "    return              v3\n" +
-            ".end method\n";
+            ".end method\n" +
+            "\n" +
+            "# End of class LTest;\n";
 
     assertEquals(expected, application.smali(new InternalOptions()));
 
@@ -122,7 +124,9 @@ public class SmaliDisassembleTest extends SmaliTestBase {
             "      0x00000001 -> :label_5  # 1\n" +
             "      0x00000002 -> :label_7  # 2\n" +
             "    .end sparse-switch\n" +
-            ".end method\n";
+            ".end method\n" +
+            "\n" +
+            "# End of class LTest;\n";
 
     assertEquals(expected, application.smali(new InternalOptions()));
 
@@ -176,7 +180,9 @@ public class SmaliDisassembleTest extends SmaliTestBase {
             "      :label_5\n" +
             "      :label_7\n" +
             "    .end packed-switch\n" +
-            ".end method\n";
+            ".end method\n" +
+            "\n" +
+            "# End of class LTest;\n";
 
     assertEquals(expected, application.smali(new InternalOptions()));
 
@@ -217,7 +223,9 @@ public class SmaliDisassembleTest extends SmaliTestBase {
             "      0x02  # 2\n" +
             "      0xff  # 255\n" +
             "    .end array-data\n" +
-            ".end method\n";
+            ".end method\n" +
+            "\n" +
+            "# End of class LTest;\n";
 
     assertEquals(expected, application.smali(new InternalOptions()));
 
@@ -258,7 +266,9 @@ public class SmaliDisassembleTest extends SmaliTestBase {
             "      0x0002  # 2\n" +
             "      0xffff  # 65535\n" +
             "    .end array-data\n" +
-            ".end method\n";
+            ".end method\n" +
+            "\n" +
+            "# End of class LTest;\n";
 
     assertEquals(expected, application.smali(new InternalOptions()));
 
@@ -299,7 +309,9 @@ public class SmaliDisassembleTest extends SmaliTestBase {
             "      0x00000002  # 2\n" +
             "      0xffffffff  # 4294967295\n" +
             "    .end array-data\n" +
-            ".end method\n";
+            ".end method\n" +
+            "\n" +
+            "# End of class LTest;\n";
 
     assertEquals(expected, application.smali(new InternalOptions()));
 
@@ -340,13 +352,14 @@ public class SmaliDisassembleTest extends SmaliTestBase {
             "      0x0000000000000002  # 2\n" +
             "      0xffffffffffffffff  # -1\n" +
             "    .end array-data\n" +
-            ".end method\n";
+            ".end method\n" +
+            "\n" +
+            "# End of class LTest;\n";
 
     assertEquals(expected, application.smali(new InternalOptions()));
 
     roundTripRawSmali(expected);
   }
-
 
   @Test
   public void interfaceClass() {
@@ -362,7 +375,33 @@ public class SmaliDisassembleTest extends SmaliTestBase {
             ".super Ljava/lang/Object;\n" +
             "\n" +
             ".method public abstract test()I\n" +
-            ".end method\n";
+            ".end method\n" +
+            "\n" +
+            "# End of class LTest;\n";
+
+    assertEquals(expected, application.smali(new InternalOptions()));
+
+    roundTripRawSmali(expected);
+  }
+
+  @Test
+  public void implementsInterface() {
+    SmaliBuilder builder = new SmaliBuilder();
+    builder.addClass("Test", "java.lang.Object", ImmutableList.of("java.util.List"));
+    builder.addAbstractMethod("int", "test", ImmutableList.of());
+    DexApplication application = buildApplication(builder);
+    assertEquals(1, Iterables.size(application.classes()));
+
+    String expected =
+        ".class public LTest;\n" +
+            "\n" +
+            ".super Ljava/lang/Object;\n" +
+            ".implements Ljava/util/List;\n" +
+            "\n" +
+            ".method public abstract test()I\n" +
+            ".end method\n" +
+            "\n" +
+            "# End of class LTest;\n";
 
     assertEquals(expected, application.smali(new InternalOptions()));
 

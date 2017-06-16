@@ -41,13 +41,14 @@ public class ProguardConfigurationParser {
           "optimizationpasses",
           "target");
   private static final List<String> ignoredOptionalSingleArgOptions = ImmutableList
-      .of("keepdirectories");
+      .of("keepdirectories", "runtype", "laststageoutput");
   private static final List<String> ignoredFlagOptions = ImmutableList
       .of("forceprocessing", "dontusemixedcaseclassnames",
           "dontpreverify", "experimentalshrinkunusedprotofields",
           "filterlibraryjarswithorginalprogramjars",
           "dontskipnonpubliclibraryclasses",
           "dontskipnonpubliclibraryclassmembers",
+          "overloadaggressively",
           "invokebasemethod");
   private static final List<String> ignoredClassDescriptorOptions = ImmutableList
       .of("isclassnamestring",

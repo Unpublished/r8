@@ -7,6 +7,7 @@
 # if an argument is given, run only tests with that pattern. This script will
 # force the tests to run, even if no input changed.
 
+import os
 import gradle
 import optparse
 import sys
@@ -47,6 +48,9 @@ def ParseOptions():
   result.add_option('--jctf_compile_only',
       help="Don't run, only compile JCTF tests.",
       default=False, action='store_true')
+  result.add_option('--disable_assertions',
+      help="Disable assertions when running tests.",
+      default=False, action='store_true')
 
   return result.parse_args()
 
@@ -74,15 +78,23 @@ def Main():
     gradle_args.append('-Ponly_jctf')
   if options.jctf_compile_only:
     gradle_args.append('-Pjctf_compile_only')
+  if options.disable_assertions:
+    gradle_args.append('-Pdisable_assertions')
   if len(args) > 0:
     gradle_args.append('--tests')
     gradle_args.append(args[0])
-
+  if os.name == 'nt':
+    # temporary hack
+    gradle_args.append('-Pno_internal')
+    gradle_args.append('-x')
+    gradle_args.append('createJctfTests')
+    gradle_args.append('-x')
+    gradle_args.append('jctfCommonJar')
+    gradle_args.append('-x')
+    gradle_args.append('jctfTestsClasses')
   vms_to_test = [options.dex_vm] if options.dex_vm != "all" else ALL_ART_VMS
   for art_vm in vms_to_test:
     gradle.RunGradle(gradle_args + ['-Pdex_vm=%s' % art_vm])
 
 if __name__ == '__main__':
   sys.exit(Main())
-
-

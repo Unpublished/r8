@@ -7,10 +7,13 @@ import static com.android.tools.r8.utils.FileUtils.CLASS_EXTENSION;
 import static com.android.tools.r8.utils.FileUtils.isArchive;
 import static com.android.tools.r8.utils.FileUtils.isClassFile;
 
+import com.android.tools.r8.ClassFileResourceProvider;
 import com.android.tools.r8.Resource;
-import com.android.tools.r8.ResourceProvider;
 import com.android.tools.r8.errors.CompilationError;
+import com.google.common.collect.Sets;
 import com.google.common.io.ByteStreams;
+
+import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.nio.file.Path;
@@ -18,20 +21,22 @@ import java.nio.file.Paths;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipException;
 import java.util.zip.ZipInputStream;
 
-/**
- * Lazy resource provider based on preloaded/prebuilt context.
- *
- * NOTE: only handles classfile resources.
- */
-public final class PreloadedResourceProvider implements ResourceProvider {
+/** Lazy Java class file resource provider based on preloaded/prebuilt context. */
+public final class PreloadedClassFileProvider implements ClassFileResourceProvider {
   private final Map<String, byte[]> content;
 
-  private PreloadedResourceProvider(Map<String, byte[]> content) {
+  private PreloadedClassFileProvider(Map<String, byte[]> content) {
     this.content = content;
+  }
+
+  @Override
+  public Set<String> getClassDescriptors() {
+    return Sets.newHashSet(content.keySet());
   }
 
   @Override
@@ -44,7 +49,7 @@ public final class PreloadedResourceProvider implements ResourceProvider {
   }
 
   /** Create preloaded content resource provider from archive file. */
-  public static ResourceProvider fromArchive(Path archive) throws IOException {
+  public static ClassFileResourceProvider fromArchive(Path archive) throws IOException {
     assert isArchive(archive);
     Builder builder = builder();
     try (ZipInputStream stream = new ZipInputStream(new FileInputStream(archive.toFile()))) {
@@ -73,11 +78,19 @@ public final class PreloadedResourceProvider implements ResourceProvider {
     assert name != null;
     assert name.endsWith(CLASS_EXTENSION) :
         "Name " + name + " must have " + CLASS_EXTENSION + " suffix";
-    String descriptor = name.substring(0, name.length() - CLASS_EXTENSION.length());
+    String fileName =
+            File.separatorChar == '/' ? name.toString() :
+                    name.toString().replace(File.separatorChar, '/');
+    String descriptor = fileName.substring(0, fileName.length() - CLASS_EXTENSION.length());
     if (descriptor.contains(".")) {
-      throw new CompilationError("Unexpected file name in the archive: " + name);
+      throw new CompilationError("Unexpected file name in the archive: " + fileName);
     }
     return 'L' + descriptor + ';';
+  }
+
+  @Override
+  public String toString() {
+    return content.size() + " preloaded resources";
   }
 
   /** Create a new empty builder. */
@@ -100,9 +113,9 @@ public final class PreloadedResourceProvider implements ResourceProvider {
       return this;
     }
 
-    public PreloadedResourceProvider build() {
+    public PreloadedClassFileProvider build() {
       assert content != null;
-      PreloadedResourceProvider provider = new PreloadedResourceProvider(content);
+      PreloadedClassFileProvider provider = new PreloadedClassFileProvider(content);
       content = null;
       return provider;
     }

@@ -39,14 +39,12 @@ import com.android.tools.r8.utils.AndroidApp;
 import com.android.tools.r8.utils.CfgPrinter;
 import com.android.tools.r8.utils.InternalOptions;
 import com.android.tools.r8.utils.InternalOptions.AttributeRemovalOptions;
-import com.android.tools.r8.utils.OutputMode;
 import com.android.tools.r8.utils.PackageDistribution;
 import com.android.tools.r8.utils.ThreadUtils;
 import com.android.tools.r8.utils.Timing;
 import com.google.common.io.ByteStreams;
 import com.google.common.io.Closer;
 import java.io.ByteArrayOutputStream;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.PrintStream;
@@ -55,6 +53,7 @@ import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
@@ -145,7 +144,8 @@ public class R8 {
     return result;
   }
 
-  public static void disassemble(R8Command command) throws IOException, ExecutionException {
+  public static void disassemble(Disassemble.DisassembleCommand command)
+      throws IOException, ExecutionException {
     Path output = command.getOutputPath();
     AndroidApp app = command.getInputApp();
     InternalOptions options = command.getInternalOptions();
@@ -172,7 +172,7 @@ public class R8 {
   }
 
   static CompilationResult runForTesting(AndroidApp app, InternalOptions options)
-      throws ProguardRuleParserException, ExecutionException, IOException {
+      throws ProguardRuleParserException, IOException {
     ExecutorService executor = ThreadUtils.getExecutorService(options);
     try {
       return runForTesting(app, options, executor);
@@ -185,12 +185,12 @@ public class R8 {
       AndroidApp app,
       InternalOptions options,
       ExecutorService executor)
-      throws ProguardRuleParserException, ExecutionException, IOException {
+      throws ProguardRuleParserException, IOException {
     return new R8(options).run(app, executor);
   }
 
   private CompilationResult run(AndroidApp inputApp, ExecutorService executorService)
-      throws IOException, ExecutionException, ProguardRuleParserException {
+      throws IOException, ProguardRuleParserException {
     if (options.quiet) {
       System.setOut(new PrintStream(ByteStreams.nullOutputStream()));
     }
@@ -323,7 +323,7 @@ public class R8 {
       timing.end();
 
       // If a method filter is present don't produce output since the application is likely partial.
-      if (!options.methodsFilter.isEmpty()) {
+      if (options.hasMethodsFilter()) {
         System.out.println("Finished compilation with method filter: ");
         options.methodsFilter.forEach((m) -> System.out.println("  - " + m));
         return null;
@@ -347,21 +347,14 @@ public class R8 {
               packageDistribution,
               options);
 
-      if (options.printMapping && androidApp.hasProguardMap() && !options.skipMinification) {
-        Path mapOutput = options.printMappingFile;
-        try (Closer closer = Closer.create()) {
-          OutputStream mapOut;
-          if (mapOutput == null) {
-            mapOut = System.out;
-          } else {
-            mapOut = new FileOutputStream(mapOutput.toFile());
-            closer.register(mapOut);
-          }
-          androidApp.writeProguardMap(closer, mapOut);
-        }
-      }
       options.printWarnings();
       return new CompilationResult(androidApp, application, appInfo);
+    } catch (ExecutionException e) {
+      if (e.getCause() instanceof CompilationError) {
+        throw (CompilationError) e.getCause();
+      } else {
+        throw new RuntimeException(e.getMessage(), e.getCause());
+      }
     } finally {
       // Dump timings.
       if (options.printTimes) {
@@ -380,13 +373,63 @@ public class R8 {
    * @return the compilation result.
    */
   public static AndroidApp run(R8Command command)
-      throws IOException, CompilationException, ExecutionException, ProguardRuleParserException {
-    AndroidApp outputApp =
-        runForTesting(command.getInputApp(), command.getInternalOptions()).androidApp;
-    if (command.getOutputPath() != null) {
-      outputApp.write(command.getOutputPath(), OutputMode.Indexed);
+      throws IOException, CompilationException, ProguardRuleParserException {
+    ExecutorService executorService = ThreadUtils.getExecutorService(command.getInternalOptions());
+    try {
+      return run(command, executorService);
+    } finally {
+      executorService.shutdown();
     }
-    return outputApp;
+  }
+
+  static void writeOutputs(R8Command command, InternalOptions options, AndroidApp outputApp)
+      throws IOException {
+    if (command.getOutputPath() != null) {
+      outputApp.write(command.getOutputPath(), options.outputMode);
+    }
+
+    if (options.printMapping && !options.skipMinification) {
+      assert outputApp.hasProguardMap();
+      try (Closer closer = Closer.create()) {
+        OutputStream mapOut =
+            openPathWithDefault(closer, options.printMappingFile, true, System.out);
+        outputApp.writeProguardMap(closer, mapOut);
+      }
+    }
+    if (options.printSeeds) {
+      assert outputApp.hasProguardSeeds();
+      try (Closer closer = Closer.create()) {
+        OutputStream seedsOut =
+            openPathWithDefault(closer, options.seedsFile, true, System.out);
+        outputApp.writeProguardSeeds(closer, seedsOut);
+      }
+    }
+    if (options.printMainDexList && outputApp.hasMainDexList()) {
+      try (Closer closer = Closer.create()) {
+        OutputStream mainDexOut =
+            openPathWithDefault(closer, options.printMainDexListFile, true, System.out);
+        outputApp.writeMainDexList(closer, mainDexOut);
+      }
+    }
+  }
+
+  private static OutputStream openPathWithDefault(Closer closer,
+      Path file,
+      boolean allowOverwrite,
+      PrintStream defaultOutput) throws IOException {
+    OutputStream mapOut;
+    if (file == null) {
+      mapOut = defaultOutput;
+    } else {
+      if (!allowOverwrite) {
+        mapOut = Files.newOutputStream(file, StandardOpenOption.CREATE_NEW);
+      } else {
+        mapOut = Files.newOutputStream(file,
+            StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+      }
+      closer.register(mapOut);
+    }
+    return mapOut;
   }
 
   /**
@@ -400,17 +443,16 @@ public class R8 {
    * @return the compilation result.
    */
   public static AndroidApp run(R8Command command, ExecutorService executor)
-      throws IOException, CompilationException, ExecutionException, ProguardRuleParserException {
+      throws IOException, CompilationException, ProguardRuleParserException {
+    InternalOptions options = command.getInternalOptions();
     AndroidApp outputApp =
-        runForTesting(command.getInputApp(), command.getInternalOptions(), executor).androidApp;
-    if (command.getOutputPath() != null) {
-      outputApp.write(command.getOutputPath(), OutputMode.Indexed);
-    }
+        runForTesting(command.getInputApp(), options, executor).androidApp;
+    writeOutputs(command, options, outputApp);
     return outputApp;
   }
 
   private static void run(String[] args)
-      throws ExecutionException, IOException, ProguardRuleParserException, CompilationException {
+      throws IOException, ProguardRuleParserException, CompilationException {
     R8Command.Builder builder = R8Command.parse(args);
     if (builder.getOutputPath() == null) {
       builder.setOutputPath(Paths.get("."));
@@ -441,7 +483,7 @@ public class R8 {
     } catch (ProguardRuleParserException e) {
       System.err.println("Failed parsing proguard keep rules: " + e.getMessage());
       System.exit(1);
-    } catch (RuntimeException | ExecutionException e) {
+    } catch (RuntimeException e) {
       System.err.println("Compilation failed with an internal error.");
       Throwable cause = e.getCause() == null ? e : e.getCause();
       cause.printStackTrace();

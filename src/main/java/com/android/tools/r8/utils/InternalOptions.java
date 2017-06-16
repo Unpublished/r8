@@ -66,6 +66,8 @@ public class InternalOptions {
   public Path seedsFile;
   public boolean printMapping;
   public Path printMappingFile;
+  public boolean printMainDexList;
+  public Path printMainDexListFile;
   public boolean ignoreMissingClasses = false;
   public boolean skipMinification = false;
   public String packagePrefix = "";
@@ -98,9 +100,13 @@ public class InternalOptions {
     return printed;
   }
 
+  public boolean hasMethodsFilter() {
+    return methodsFilter.size() > 0;
+  }
+
   public boolean methodMatchesFilter(DexEncodedMethod method) {
     // Not specifying a filter matches all methods.
-    if (methodsFilter.size() == 0) {
+    if (!hasMethodsFilter()) {
       return true;
     }
     // Currently the filter is simple string equality on the qualified name.

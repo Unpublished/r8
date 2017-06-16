@@ -268,7 +268,7 @@ public class DexSourceCode implements SourceCode {
   }
 
   @Override
-  public boolean traceInstruction(int index, IRBuilder builder) {
+  public int traceInstruction(int index, IRBuilder builder) {
     Instruction dex = code.instructions[index];
     int offset = dex.getOffset();
     assert !dex.isPayload();
@@ -277,9 +277,9 @@ public class DexSourceCode implements SourceCode {
       // Check that we don't ever have instructions that can throw and have targets.
       assert !dex.canThrow();
       for (int relativeOffset : targets) {
-        builder.ensureSuccessorBlock(offset + relativeOffset);
+        builder.ensureNormalSuccessorBlock(offset, offset + relativeOffset);
       }
-      return true;
+      return index;
     }
     if (dex.canThrow()) {
       // If the instruction can throw and is in a try block, add edges to its catch successors.
@@ -297,7 +297,7 @@ public class DexSourceCode implements SourceCode {
         builder.ensureBlockWithoutEnqueuing(tryRangeStartAddress);
         // Edge to exceptional successors.
         for (Integer handlerOffset : getUniqueTryHandlerOffsets(tryRange)) {
-          builder.ensureSuccessorBlock(handlerOffset);
+          builder.ensureExceptionalSuccessorBlock(offset, handlerOffset);
         }
         // If the following instruction is a move-result include it in this (the invokes) block.
         if (index + 1 < code.instructions.length && isMoveResult(code.instructions[index + 1])) {
@@ -307,29 +307,29 @@ public class DexSourceCode implements SourceCode {
         }
         // Edge to normal successor if any (fallthrough).
         if (!(dex instanceof Throw)) {
-          builder.ensureSuccessorBlock(dex.getOffset() + dex.getSize());
+          builder.ensureNormalSuccessorBlock(offset, dex.getOffset() + dex.getSize());
         }
-        return true;
+        return index;
       }
       // Close the block if the instruction is a throw, otherwise the block remains open.
-      return dex instanceof Throw;
+      return dex instanceof Throw ? index : -1;
     }
     if (dex.isSwitch()) {
       // TODO(zerny): Remove this from block computation.
       switchPayloadResolver.addPayloadUser(dex);
 
       for (int target : switchPayloadResolver.absoluteTargets(dex)) {
-        builder.ensureSuccessorBlock(target);
+        builder.ensureNormalSuccessorBlock(offset, target);
       }
-      builder.ensureSuccessorBlock(offset + dex.getSize());
-      return true;
+      builder.ensureNormalSuccessorBlock(offset, offset + dex.getSize());
+      return index;
     }
     // TODO(zerny): Remove this from block computation.
     if (dex.hasPayload()) {
       arrayFilledDataPayloadResolver.addPayloadUser((FillArrayData) dex);
     }
     // This instruction does not close the block.
-    return false;
+    return -1;
   }
 
   private boolean inTryRange(Try tryItem, int offset) {

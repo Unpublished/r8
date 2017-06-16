@@ -7,8 +7,8 @@ import static com.android.tools.r8.utils.FileUtils.isArchive;
 import static com.android.tools.r8.utils.FileUtils.isClassFile;
 import static com.android.tools.r8.utils.FileUtils.isDexFile;
 
+import com.android.tools.r8.ClassFileResourceProvider;
 import com.android.tools.r8.Resource;
-import com.android.tools.r8.ResourceProvider;
 import com.android.tools.r8.errors.CompilationError;
 import com.android.tools.r8.errors.Unreachable;
 import com.android.tools.r8.graph.ClassKind;
@@ -49,14 +49,12 @@ import java.util.zip.ZipOutputStream;
 public class AndroidApp {
 
   public static final String DEFAULT_PROGUARD_MAP_FILE = "proguard.map";
-  public static final String DEFAULT_PROGUARD_SEEDS_FILE = "proguard.seeds";
-  public static final String DEFAULT_PACKAGE_DISTRIBUTION_FILE = "package.map";
 
   private final ImmutableList<Resource> programResources;
   private final ImmutableList<Resource> classpathResources;
   private final ImmutableList<Resource> libraryResources;
-  private final ImmutableList<ResourceProvider> classpathResourceProviders;
-  private final ImmutableList<ResourceProvider> libraryResourceProviders;
+  private final ImmutableList<ClassFileResourceProvider> classpathResourceProviders;
+  private final ImmutableList<ClassFileResourceProvider> libraryResourceProviders;
   private final Resource proguardMap;
   private final Resource proguardSeeds;
   private final Resource packageDistribution;
@@ -67,8 +65,8 @@ public class AndroidApp {
       ImmutableList<Resource> programResources,
       ImmutableList<Resource> classpathResources,
       ImmutableList<Resource> libraryResources,
-      ImmutableList<ResourceProvider> classpathResourceProviders,
-      ImmutableList<ResourceProvider> libraryResourceProviders,
+      ImmutableList<ClassFileResourceProvider> classpathResourceProviders,
+      ImmutableList<ClassFileResourceProvider> libraryResourceProviders,
       Resource proguardMap,
       Resource proguardSeeds,
       Resource packageDistribution,
@@ -178,12 +176,12 @@ public class AndroidApp {
   }
 
   /** Get classpath resource providers. */
-  public List<ResourceProvider> getClasspathResourceProviders() {
+  public List<ClassFileResourceProvider> getClasspathResourceProviders() {
     return classpathResourceProviders;
   }
 
   /** Get library resource providers. */
-  public List<ResourceProvider> getLibraryResourceProviders() {
+  public List<ClassFileResourceProvider> getLibraryResourceProviders() {
     return libraryResourceProviders;
   }
 
@@ -290,8 +288,6 @@ public class AndroidApp {
         Path fileName = directory.resolve(outputMode.getFileName(dexProgramSources.get(i), i));
         Files.copy(dexProgramSources.get(i).getStream(closer), fileName, options);
       }
-      writeProguardMap(closer, directory, overwrite);
-      writeProguardSeeds(closer, directory, overwrite);
     }
   }
 
@@ -334,17 +330,6 @@ public class AndroidApp {
           out.closeEntry();
         }
       }
-      // Write the proguard map to the archives containing directory.
-      // TODO(zerny): How do we want to determine the output location for the extra resources?
-      writeProguardMap(closer, archive.getParent(), overwrite);
-      writeProguardSeeds(closer, archive.getParent(), overwrite);
-    }
-  }
-
-  private void writeProguardMap(Closer closer, Path parent, boolean overwrite) throws IOException {
-    InputStream input = getProguardMap(closer);
-    if (input != null) {
-      Files.copy(input, parent.resolve(DEFAULT_PROGUARD_MAP_FILE), copyOptions(overwrite));
     }
   }
 
@@ -354,12 +339,16 @@ public class AndroidApp {
     out.write(ByteStreams.toByteArray(input));
   }
 
-  private void writeProguardSeeds(Closer closer, Path parent, boolean overwrite)
-      throws IOException {
+  public void writeProguardSeeds(Closer closer, OutputStream out) throws IOException {
     InputStream input = getProguardSeeds(closer);
-    if (input != null) {
-      Files.copy(input, parent.resolve(DEFAULT_PROGUARD_SEEDS_FILE), copyOptions(overwrite));
-    }
+    assert input != null;
+    out.write(ByteStreams.toByteArray(input));
+  }
+
+  public void writeMainDexList(Closer closer, OutputStream out) throws IOException {
+    InputStream input = getMainDexList(closer);
+    assert input != null;
+    out.write(ByteStreams.toByteArray(input));
   }
 
   private OpenOption[] openOptions(boolean overwrite) {
@@ -383,8 +372,8 @@ public class AndroidApp {
     private final List<Resource> programResources = new ArrayList<>();
     private final List<Resource> classpathResources = new ArrayList<>();
     private final List<Resource> libraryResources = new ArrayList<>();
-    private final List<ResourceProvider> classpathResourceProviders = new ArrayList<>();
-    private final List<ResourceProvider> libraryResourceProviders = new ArrayList<>();
+    private final List<ClassFileResourceProvider> classpathResourceProviders = new ArrayList<>();
+    private final List<ClassFileResourceProvider> libraryResourceProviders = new ArrayList<>();
     private Resource proguardMap;
     private Resource proguardSeeds;
     private Resource packageDistribution;
@@ -467,7 +456,7 @@ public class AndroidApp {
     /**
      * Add classpath resource provider.
      */
-    public Builder addClasspathResourceProvider(ResourceProvider provider) {
+    public Builder addClasspathResourceProvider(ClassFileResourceProvider provider) {
       classpathResourceProviders.add(provider);
       return this;
     }
@@ -492,7 +481,7 @@ public class AndroidApp {
     /**
      * Add library resource provider.
      */
-    public Builder addLibraryResourceProvider(ResourceProvider provider) {
+    public Builder addLibraryResourceProvider(ClassFileResourceProvider provider) {
       libraryResourceProviders.add(provider);
       return this;
     }
@@ -588,6 +577,14 @@ public class AndroidApp {
     }
 
     /**
+     * Set the main-dex list data.
+     */
+    public Builder setMainDexListData(byte[] content) {
+      mainDexList = content == null ? null : Resource.fromBytes(null, content);
+      return this;
+    }
+
+    /**
      * Build final AndroidApp.
      */
     public AndroidApp build() {
@@ -644,7 +641,7 @@ public class AndroidApp {
                 Resource.Kind.DEX, ByteStreams.toByteArray(stream)));
           } else if (isClassFile(name)) {
             containsClassData = true;
-            String descriptor = PreloadedResourceProvider.guessTypeDescriptor(name);
+            String descriptor = PreloadedClassFileProvider.guessTypeDescriptor(name);
             resources(classKind).add(Resource.fromBytes(Resource.Kind.CLASSFILE,
                 ByteStreams.toByteArray(stream), Collections.singleton(descriptor)));
           }

@@ -11,6 +11,7 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import com.android.tools.r8.TestBase;
+import com.android.tools.r8.ToolHelper;
 import com.android.tools.r8.graph.DexAccessFlags;
 import com.android.tools.r8.graph.DexItemFactory;
 import java.io.IOException;
@@ -45,6 +46,8 @@ public class ProguardConfigurationParserTest extends TestBase {
       INVALID_PROGUARD_DIR + "including-2.flags";
   private static final String LIBRARY_JARS =
       VALID_PROGUARD_DIR + "library-jars.flags";
+  private static final String LIBRARY_JARS_WIN =
+          VALID_PROGUARD_DIR + "library-jars-win.flags";
   private static final String SEEDS =
       VALID_PROGUARD_DIR + "seeds.flags";
   private static final String SEEDS_2 =
@@ -59,6 +62,8 @@ public class ProguardConfigurationParserTest extends TestBase {
       VALID_PROGUARD_DIR + "dontskipnonpubliclibraryclasses.flags";
   private static final String DONT_SKIP_NON_PUBLIC_LIBRARY_CLASS_MEMBERS =
       VALID_PROGUARD_DIR + "dontskipnonpubliclibraryclassmembers.flags";
+  private static final String OVERLOAD_AGGRESIVELY =
+      VALID_PROGUARD_DIR + "overloadaggressively.flags";
   private static final String DONT_OPTIMIZE =
       VALID_PROGUARD_DIR + "dontoptimize.flags";
   private static final String SKIP_NON_PUBLIC_LIBRARY_CLASSES =
@@ -281,7 +286,11 @@ public class ProguardConfigurationParserTest extends TestBase {
   @Test
   public void parseLibraryJars() throws IOException, ProguardRuleParserException {
     ProguardConfigurationParser parser = new ProguardConfigurationParser(new DexItemFactory());
-    parser.parse(Paths.get(LIBRARY_JARS));
+    if (!ToolHelper.isLinux() && !ToolHelper.isMac()) {
+      parser.parse(Paths.get(LIBRARY_JARS_WIN));
+    } else {
+      parser.parse(Paths.get(LIBRARY_JARS));
+    }
     assertEquals(4, parser.getConfig().getLibraryjars().size());
   }
 
@@ -332,6 +341,13 @@ public class ProguardConfigurationParserTest extends TestBase {
   }
 
   @Test
+  public void parseOverloadAggressively()
+      throws IOException, ProguardRuleParserException {
+    ProguardConfigurationParser parser = new ProguardConfigurationParser(new DexItemFactory());
+    parser.parse(Paths.get(OVERLOAD_AGGRESIVELY));
+  }
+
+  @Test
   public void parseDontOptimize()
       throws IOException, ProguardRuleParserException {
     ProguardConfigurationParser parser = new ProguardConfigurationParser(new DexItemFactory());
@@ -369,6 +385,17 @@ public class ProguardConfigurationParserTest extends TestBase {
         "-keepclassx public class * {  ",
         "  native <methods>;           ",
         "}                             "
+    );
+    parser.parse(proguardConfig);
+  }
+
+  @Test
+  public void parseCustomFlags() throws Exception {
+    ProguardConfigurationParser parser = new ProguardConfigurationParser(new DexItemFactory());
+    // Custom Proguard flags -runtype and -laststageoutput are ignored.
+    Path proguardConfig = writeTextToTempFile(
+        "-runtype FINAL                    ",
+        "-laststageoutput /some/file/name  "
     );
     parser.parse(proguardConfig);
   }

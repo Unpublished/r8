@@ -421,12 +421,7 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
   }
 
   @Override
-  public int getRegisterForRangedArgument(Value value, int instructionNumber) {
-    // If argument values flow into ranged invokes, all the ranged invoke arguments
-    // are arguments to this method in order. Therefore, we use the incoming registers
-    // for the ranged invoke arguments. We know that arguments are always available there.
-    // If argument reuse is allowed there is no splitting and if argument reuse is disallowed
-    // the argument registers are never overwritten.
+  public int getArgumentOrAllocateRegisterForValue(Value value, int instructionNumber) {
     if (value.isArgument()) {
       return getRegisterForIntervals(value.getLiveIntervals());
     }
@@ -1414,7 +1409,8 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
     assert spilled.isSpilled();
     assert spilled.getValue().isConstant();
     assert !spilled.isLinked() || spilled.isArgumentInterval();
-    int maxGapSize = 50 * INSTRUCTION_NUMBER_DELTA;
+    // Do not split range if constant is reused by one of the eleven following instruction.
+    int maxGapSize = 11 * INSTRUCTION_NUMBER_DELTA;
     if (!spilled.getUses().isEmpty()) {
       // Split at first use after the spill position and add to unhandled to get a register
       // assigned for rematerialization.
@@ -1520,7 +1516,7 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
         // If we are processing an exception edge, we need to use the throwing instruction
         // as the instruction we are coming from.
         int fromInstruction = block.exit().getNumber();
-        boolean isCatch = block.isCatchSuccessor(successor);
+        boolean isCatch = block.hasCatchSuccessor(successor);
         if (isCatch) {
           for (Instruction instruction : block.getInstructions()) {
             if (instruction.instructionTypeCanThrow()) {

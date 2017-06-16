@@ -14,7 +14,6 @@ import com.android.tools.r8.shaking.ProguardRuleParserException;
 import com.android.tools.r8.utils.AndroidApp;
 import com.android.tools.r8.utils.InternalOptions;
 import com.android.tools.r8.utils.ListUtils;
-import com.android.tools.r8.utils.OutputMode;
 import com.android.tools.r8.utils.Timing;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -41,6 +40,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import joptsimple.internal.Strings;
+import org.junit.Assume;
 import org.junit.rules.TemporaryFolder;
 
 public class ToolHelper {
@@ -52,6 +52,8 @@ public class ToolHelper {
   public static final String EXAMPLES_ANDROID_N_BUILD_DIR = BUILD_DIR + "test/examplesAndroidN/";
   public static final String EXAMPLES_ANDROID_O_BUILD_DIR = BUILD_DIR + "test/examplesAndroidO/";
   public static final String SMALI_BUILD_DIR = BUILD_DIR + "test/smali/";
+
+  public static final String LINE_SEPARATOR = System.getProperty("line.separator");
 
   private static final String ANDROID_JAR_PATTERN = "third_party/android_jar/lib-v%d/android.jar";
   private static final int DEFAULT_MIN_SDK = 14;
@@ -462,9 +464,7 @@ public class ToolHelper {
       optionsConsumer.accept(options);
     }
     CompilationResult result = R8.runForTesting(app, options);
-    if (command.getOutputPath() != null) {
-      result.androidApp.write(command.getOutputPath(), OutputMode.Indexed);
-    }
+    R8.writeOutputs(command, options, result.androidApp);
     return result;
   }
 
@@ -519,6 +519,7 @@ public class ToolHelper {
   }
 
   public static ProcessResult runDX(String[] args) throws IOException {
+    Assume.assumeTrue(ToolHelper.artSupported());
     DXCommandBuilder builder = new DXCommandBuilder();
     for (String arg : args) {
       builder.appendProgramArgument(arg);
@@ -601,6 +602,7 @@ public class ToolHelper {
   }
 
   private static ProcessResult runArtProcess(ArtCommandBuilder builder) throws IOException {
+    Assume.assumeTrue(ToolHelper.artSupported());
     ProcessResult result = runProcess(builder.asProcessBuilder());
     if (result.exitCode != 0) {
       fail("Unexpected art failure: '" + result.stderr + "'\n" + result.stdout);
@@ -640,6 +642,7 @@ public class ToolHelper {
   }
 
   public static void runDex2Oat(Path file, Path outFile) throws IOException {
+    Assume.assumeTrue(ToolHelper.artSupported());
     assert Files.exists(file);
     assert ByteStreams.toByteArray(Files.newInputStream(file)).length > 0;
     List<String> command = new ArrayList<>();
