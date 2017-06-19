@@ -7,7 +7,6 @@ LOCAL_PREBUILT_STATIC_JAVA_LIBRARIES := \
     d8-support-asm-util:deps/asm-util-5.1.jar \
     d8-support-common-compress:deps/commons-compress-1.12.jar \
     d8-support-fastutil:deps/fastutil-7.2.0.jar \
-    d8-support-guava:deps/guava-19.0.jar \
     d8-support-jopt:deps/jopt-simple-4.6.jar
 include $(BUILD_HOST_PREBUILT)
 
@@ -22,6 +21,6 @@ LOCAL_STATIC_JAVA_LIBRARIES := \
     d8-support-asm-util \
     d8-support-common-compress \
     d8-support-fastutil \
-    d8-support-guava \
-    d8-support-jopt 
+    d8-support-jopt \
+    guavalib 
 include $(BUILD_HOST_JAVA_LIBRARY)
