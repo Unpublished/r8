@@ -3,8 +3,13 @@
 // BSD-style license that can be found in the LICENSE file.
 package com.android.tools.r8.dex;
 
+import com.android.tools.r8.dex.VirtualFile.FilePerClassDistributor;
+import com.android.tools.r8.dex.VirtualFile.FillFilesDistributor;
+import com.android.tools.r8.dex.VirtualFile.PackageMapDistributor;
+import com.android.tools.r8.errors.CompilationError;
 import com.android.tools.r8.graph.AppInfo;
 import com.android.tools.r8.graph.DexAnnotation;
+import com.android.tools.r8.graph.DexAnnotationDirectory;
 import com.android.tools.r8.graph.DexAnnotationSet;
 import com.android.tools.r8.graph.DexAnnotationSetRefList;
 import com.android.tools.r8.graph.DexApplication;
@@ -20,6 +25,7 @@ import com.android.tools.r8.naming.NamingLens;
 import com.android.tools.r8.utils.AndroidApp;
 import com.android.tools.r8.utils.DescriptorUtils;
 import com.android.tools.r8.utils.InternalOptions;
+import com.android.tools.r8.utils.OutputMode;
 import com.android.tools.r8.utils.PackageDistribution;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -89,6 +95,12 @@ public class ApplicationWriter {
     public boolean add(DexAnnotationSetRefList annotationSetRefList) {
       return true;
     }
+
+    @Override
+    public boolean setAnnotationsDirectoryForClass(DexProgramClass clazz,
+        DexAnnotationDirectory annotationDirectory) {
+      return true;
+    }
   }
 
   public ApplicationWriter(
@@ -113,13 +125,38 @@ public class ApplicationWriter {
       application.dexItemFactory.sort(namingLens);
       SortAnnotations sortAnnotations = new SortAnnotations();
       application.classes().forEach((clazz) -> clazz.addDependencies(sortAnnotations));
-      Map<Integer, VirtualFile> newFiles =
-          VirtualFile.fileSetFrom(this, packageDistribution, executorService);
 
-      // Write the dex files and the Proguard mapping file in parallel.
+      // Distribute classes into dex files.
+      VirtualFile.Distributor distributor = null;
+      if (options.outputMode == OutputMode.FilePerClass) {
+        assert packageDistribution == null :
+            "Cannot combine package distribution definition with file-per-class option.";
+        distributor = new FilePerClassDistributor(this);
+      } else if (options.minApiLevel < Constants.ANDROID_L_API
+            && options.mainDexKeepRules.isEmpty()
+            && application.mainDexList.isEmpty()) {
+        if (packageDistribution != null) {
+          throw new CompilationError("Cannot apply package distribution. Multidex is not"
+              + " supported with API level " + options.minApiLevel +"."
+              + " For API level < " + Constants.ANDROID_L_API + ", main dex classes list or"
+              + " rules must be specified.");
+        }
+        distributor = new VirtualFile.MonoDexDistributor(this);
+      } else if (packageDistribution != null) {
+        assert !options.minimalMainDex :
+            "Cannot combine package distribution definition with minimal-main-dex option.";
+        distributor = new PackageMapDistributor(this, packageDistribution, executorService);
+      } else {
+        distributor = new FillFilesDistributor(this, options.minimalMainDex);
+      }
+      Map<Integer, VirtualFile> newFiles = distributor.run();
+
+      // Write the dex files and the Proguard mapping file in parallel. Use a linked hash map
+      // as the order matters when addDexProgramData is called below.
       LinkedHashMap<VirtualFile, Future<byte[]>> dexDataFutures = new LinkedHashMap<>();
-      for (Integer index : newFiles.keySet()) {
-        VirtualFile newFile = newFiles.get(index);
+      for (int i = 0; i < newFiles.size(); i++) {
+        VirtualFile newFile = newFiles.get(i);
+        assert newFile.getId() == i;
         if (!newFile.isEmpty()) {
           dexDataFutures.put(newFile, executorService.submit(() -> writeDexFile(newFile)));
         }

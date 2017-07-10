@@ -75,8 +75,10 @@ public abstract class R8RunArtTestsTest {
     R8_AFTER_D8 // refers to the R8 (default: debug) step but implies a previous D8 step as well
   }
 
-  private static final String ART_TESTS_DIR = "tests/art";
-  private static final String ART_TESTS_NATIVE_LIBRARY_DIR = "tests/art/lib64";
+  private static final String ART_TESTS_DIR = "tests/2017-07-07/art";
+  private static final String ART_LEGACY_TESTS_DIR = "tests/2016-12-19/art/";
+  private static final String ART_TESTS_NATIVE_LIBRARY_DIR = "tests/2017-07-07/art/lib64";
+  private static final String ART_LEGACY_TESTS_NATIVE_LIBRARY_DIR = "tests/2016-12-19/art/lib64";
 
   // Input jar for jctf tests.
   private static final String JCTF_COMMON_JAR = "build/libs/jctfCommon.jar";
@@ -90,7 +92,7 @@ public abstract class R8RunArtTestsTest {
   private static final String HAMCREST_JAR =
       "third_party/gradle/gradle/lib/plugins/hamcrest-core-1.3.jar";
 
-  // Test that required to set min-sdk-version to a specific value.
+  // Test that required to set min-api to a specific value.
   private static Map<String, Integer> needMinSdkVersion =
       new ImmutableMap.Builder<String, Integer>()
           // Android O
@@ -102,6 +104,8 @@ public abstract class R8RunArtTestsTest {
           .put("044-proxy", Constants.ANDROID_N_API)
           // Test intentionally asserts absence of default interface method in a class.
           .put("048-reflect-v8", Constants.ANDROID_N_API)
+          // Uses default interface methods.
+          .put("616-cha-interface-default", Constants.ANDROID_N_API)
           // Interface initializer is not triggered after desugaring.
           .put("962-iface-static", Constants.ANDROID_N_API)
           // Interface initializer is not triggered after desugaring.
@@ -346,11 +350,14 @@ public abstract class R8RunArtTestsTest {
       "597-deopt-new-string",
       "616-cha",
       "616-cha-abstract",
+      "616-cha-interface",
+      "616-cha-interface-default",
+      "616-cha-miranda",
       "616-cha-regression-proxy-method",
       "616-cha-native",
+      "616-cha-proxy-method-inline",
       "626-const-class-linking",
       "626-set-resolved-string",
-      "629-vdex-speed",
       "900-hello-plugin",
       "901-hello-ti-agent",
       "1337-gc-coverage"
@@ -566,10 +573,32 @@ public abstract class R8RunArtTestsTest {
           // Fails: get_vreg_jni.cc:46] Check failed: value == 42u (value=314630384, 42u=42)
           // The R8/D8 code does not produce values in the same registers as the tests expects in
           // Main.testPairVReg where Main.doNativeCall is called (v1 vs v0).
-          .put("454-get-vreg", TestCondition.any())
+          .put(
+              "454-get-vreg",
+              TestCondition.match(
+                  TestCondition.runtimes(DexVm.ART_4_4_4, DexVm.ART_5_1_1,
+                      DexVm.ART_6_0_1, DexVm.ART_7_0_0)))
+          .put(
+              "454-get-vreg",
+              TestCondition.match(
+                  TestCondition.tools(DexTool.NONE),
+                  TestCondition.D8_COMPILER,
+                  TestCondition.runtimes(DexVm.ART_DEFAULT)))
+          .put("454-get-vreg", TestCondition.match(TestCondition.R8_COMPILER))
           // Fails: regs_jni.cc:42] Check failed: GetVReg(m, 0, kIntVReg, &value)
           // The R8/D8 code does not put values in the same registers as the tests expects.
-          .put("457-regs", TestCondition.any())
+          .put(
+              "457-regs",
+              TestCondition.match(
+                  TestCondition.runtimes(DexVm.ART_4_4_4, DexVm.ART_5_1_1,
+                      DexVm.ART_6_0_1, DexVm.ART_7_0_0)))
+          .put(
+              "457-regs",
+              TestCondition.match(
+                  TestCondition.tools(DexTool.NONE),
+                  TestCondition.D8_COMPILER,
+                  TestCondition.runtimes(DexVm.ART_DEFAULT)))
+          .put("457-regs", TestCondition.match(TestCondition.R8_COMPILER))
           // Class not found.
           .put("529-checker-unresolved", TestCondition.any())
           // Fails: env_long_ref.cc:44] Check failed: GetVReg(m, 1, kReferenceVReg, &value)
@@ -705,7 +734,46 @@ public abstract class R8RunArtTestsTest {
                   .build())
           .build();
 
-  private static List<String> failuresToTriage = ImmutableList.of();
+  private static List<String> failuresToTriage = ImmutableList.of(
+      // This is flaky.
+      "104-growth-limit",
+
+      // Various failures.
+      "138-duplicate-classes-check",
+      "461-get-reference-vreg",
+      "629-vdex-speed",
+      "638-no-line-number",
+      "647-jni-get-field-id",
+      "649-vdex-duplicate-method",
+      "652-deopt-intrinsic",
+      "655-jit-clinit",
+      "656-annotation-lookup-generic-jni",
+      "656-loop-deopt",
+      "708-jit-cache-churn",
+
+      // These use "native trace".
+      "981-dedup-original-dex",
+      "982-ok-no-retransform",
+      "983-source-transform-verify",
+      "984-obsolete-invoke",
+      "985-re-obsolete",
+      "986-native-method-bind",
+      "987-agent-bind",
+      "988-method-trace",
+      "989-method-trace-throw",
+      "990-field-trace",
+      "991-field-trace-2",
+      "992-source-data",
+      "993-breakpoints",
+      "994-breakpoint-line",
+      "995-breakpoints-throw",
+      "996-breakpoint-obsolete",
+      "997-single-step",
+
+      // These two fail with missing *-hostdex.jar files.
+      "648-inline-caches-unresolved",
+      "998-redefine-use-after-free"
+  );
 
   private static class TestSpecification {
 
@@ -811,9 +879,12 @@ public abstract class R8RunArtTestsTest {
     return set;
   }
 
-  private static Map<SpecificationKey, TestSpecification> get_tests_map(
-      CompilerUnderTest compilerUnderTest, CompilationMode compilationMode) {
+  private static Map<SpecificationKey, TestSpecification> getTestsMap(
+      CompilerUnderTest compilerUnderTest, CompilationMode compilationMode, DexVm version) {
     File artTestDir = new File(ART_TESTS_DIR);
+    if (version != DexVm.ART_DEFAULT) {
+      artTestDir = new File(ART_LEGACY_TESTS_DIR);
+    }
     if (!artTestDir.exists()) {
       // Don't run any tests if the directory does not exist.
       return Collections.emptyMap();
@@ -941,6 +1012,9 @@ public abstract class R8RunArtTestsTest {
     if (specification.nativeLibrary != null) {
       // All the native libraries for all Art tests is in the same directory.
       File artTestNativeLibraryDir = new File(ART_TESTS_NATIVE_LIBRARY_DIR);
+      if (artVersion != DexVm.ART_DEFAULT) {
+        artTestNativeLibraryDir = new File(ART_LEGACY_TESTS_NATIVE_LIBRARY_DIR);
+      }
       builder.appendArtSystemProperty(
           "java.library.path",
           artTestNativeLibraryDir.getAbsolutePath());
@@ -1270,12 +1344,18 @@ public abstract class R8RunArtTestsTest {
     CompilationMode compilationMode = defaultCompilationMode(compilerUnderTest);
 
     TestSpecification specification =
-        get_tests_map(firstCompilerUnderTest, compilationMode)
+        getTestsMap(firstCompilerUnderTest, compilationMode, version)
             .get(new SpecificationKey(name, toolchain));
 
     if (specification == null) {
-      throw new RuntimeException("Test " + name + " has no specification for toolchain"
-          + toolchain + ".");
+      if (version == DexVm.ART_DEFAULT) {
+        throw new RuntimeException("Test " + name + " has no specification for toolchain"
+            + toolchain + ".");
+      } else {
+        // For older VMs the test might not exist, as the tests are currently generates from the
+        // directories present in the art test directory for AOSP master.
+        return;
+      }
     }
 
     if (specification.skipTest) {
@@ -1317,7 +1397,7 @@ public abstract class R8RunArtTestsTest {
     if (compilerUnderTest == CompilerUnderTest.R8_AFTER_D8) {
       compilationMode = CompilationMode.DEBUG;
       specification =
-          get_tests_map(CompilerUnderTest.R8_AFTER_D8, compilationMode)
+          getTestsMap(CompilerUnderTest.R8_AFTER_D8, compilationMode, version)
               .get(new SpecificationKey(name, DexTool.DX));
 
       if (specification == null) {

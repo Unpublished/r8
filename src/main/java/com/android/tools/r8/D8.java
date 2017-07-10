@@ -60,7 +60,8 @@ public final class D8 {
    * @return the compilation result.
    */
   public static D8Output run(D8Command command) throws IOException {
-    CompilationResult result = runForTesting(command.getInputApp(), command.getInternalOptions());
+    InternalOptions options = command.getInternalOptions();
+    CompilationResult result = runForTesting(command.getInputApp(), options);
     assert result != null;
     D8Output output = new D8Output(result.androidApp, command.getOutputMode());
     if (command.getOutputPath() != null) {
@@ -80,8 +81,9 @@ public final class D8 {
    * @return the compilation result.
    */
   public static D8Output run(D8Command command, ExecutorService executor) throws IOException {
+    InternalOptions options = command.getInternalOptions();
     CompilationResult result = runForTesting(
-        command.getInputApp(), command.getInternalOptions(), executor);
+        command.getInputApp(), options, executor);
     assert result != null;
     D8Output output = new D8Output(result.androidApp, command.getOutputMode());
     if (command.getOutputPath() != null) {
@@ -160,7 +162,7 @@ public final class D8 {
       Timing timing = new Timing("DX timer");
       DexApplication app = new ApplicationReader(inputApp, options, timing).read(executor);
       AppInfo appInfo = new AppInfo(app);
-      app = optimize(app, appInfo, options);
+      app = optimize(app, appInfo, options, timing, executor);
 
       // If a method filter is present don't produce output since the application is likely partial.
       if (options.hasMethodsFilter()) {
@@ -188,12 +190,13 @@ public final class D8 {
   }
 
   private static DexApplication optimize(
-      DexApplication application, AppInfo appInfo, InternalOptions options)
-      throws IOException {
+      DexApplication application, AppInfo appInfo, InternalOptions options,
+      Timing timing, ExecutorService executor)
+      throws IOException, ExecutionException {
     final CfgPrinter printer = options.printCfg ? new CfgPrinter() : null;
 
-    IRConverter converter = new IRConverter(application, appInfo, options, printer);
-    application = converter.convertToDex();
+    IRConverter converter = new IRConverter(timing, application, appInfo, options, printer);
+    application = converter.convertToDex(executor);
 
     if (options.printCfg) {
       if (options.printCfgFile == null || options.printCfgFile.isEmpty()) {

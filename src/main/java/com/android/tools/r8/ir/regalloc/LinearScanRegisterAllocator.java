@@ -9,7 +9,7 @@ import com.android.tools.r8.graph.DebugLocalInfo;
 import com.android.tools.r8.ir.code.Add;
 import com.android.tools.r8.ir.code.And;
 import com.android.tools.r8.ir.code.BasicBlock;
-import com.android.tools.r8.ir.code.DebugPosition;
+import com.android.tools.r8.ir.code.DebugLocalsChange;
 import com.android.tools.r8.ir.code.IRCode;
 import com.android.tools.r8.ir.code.Instruction;
 import com.android.tools.r8.ir.code.InstructionListIterator;
@@ -21,10 +21,10 @@ import com.android.tools.r8.ir.code.Or;
 import com.android.tools.r8.ir.code.Phi;
 import com.android.tools.r8.ir.code.Sub;
 import com.android.tools.r8.ir.code.Value;
-import com.android.tools.r8.ir.code.Value.DebugInfo;
 import com.android.tools.r8.ir.code.Xor;
 import com.android.tools.r8.logging.Log;
 import com.android.tools.r8.utils.CfgPrinter;
+import com.android.tools.r8.utils.InternalOptions;
 import com.android.tools.r8.utils.ListUtils;
 import com.android.tools.r8.utils.StringUtils;
 import com.google.common.collect.HashMultiset;
@@ -32,8 +32,12 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Multiset;
 import com.google.common.collect.Multiset.Entry;
 import com.google.common.collect.Multisets;
+import it.unimi.dsi.fastutil.ints.Int2ReferenceMap;
+import it.unimi.dsi.fastutil.ints.Int2ReferenceOpenHashMap;
+import it.unimi.dsi.fastutil.ints.IntArraySet;
+import it.unimi.dsi.fastutil.ints.IntIterator;
+import it.unimi.dsi.fastutil.ints.IntSet;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
@@ -62,6 +66,8 @@ import java.util.TreeSet;
  */
 public class LinearScanRegisterAllocator implements RegisterAllocator {
   public static final int NO_REGISTER = Integer.MIN_VALUE;
+  public static final int REGISTER_CANDIDATE_NOT_FOUND = -1;
+  public static final int MIN_CONSTANT_FREE_FOR_POSITIONS = 5;
 
   private enum ArgumentReuseMode {
     ALLOW_ARGUMENT_REUSE,
@@ -107,6 +113,8 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
   private final IRCode code;
   // Number of registers used for arguments.
   private final int numberOfArgumentRegisters;
+  // Compiler options.
+  private final InternalOptions options;
 
   // Mapping from basic blocks to the set of values live at entry to that basic block.
   private Map<BasicBlock, Set<Value>> liveAtEntrySets = new IdentityHashMap<>();
@@ -142,8 +150,9 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
   // register.
   private boolean hasDedicatedMoveExceptionRegister = false;
 
-  public LinearScanRegisterAllocator(IRCode code) {
+  public LinearScanRegisterAllocator(IRCode code, InternalOptions options) {
     this.code = code;
+    this.options = options;
     int argumentRegisters = 0;
     for (Instruction instruction : code.blocks.getFirst().getInstructions()) {
       if (instruction.isArgument()) {
@@ -164,19 +173,19 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
     insertArgumentMoves();
     BasicBlock[] blocks = computeLivenessInformation();
     // First attempt to allocate register allowing argument reuse. This will fail if spilling
-    // is required or if we end up using more than 15 registers.
+    // is required or if we end up using more than 16 registers.
     boolean noSpilling =
         performAllocationWithoutMoveInsertion(ArgumentReuseMode.ALLOW_ARGUMENT_REUSE);
-    if (!noSpilling || registersUsed() > MAX_SMALL_REGISTER) {
+    if (!noSpilling || (highestUsedRegister() > MAX_SMALL_REGISTER)) {
       // Redo allocation disallowing argument reuse. This always succeeds.
       clearRegisterAssignments();
       performAllocation(ArgumentReuseMode.DISALLOW_ARGUMENT_REUSE);
     } else {
       // Insert spill and phi moves after allocating with argument reuse. If the moves causes
-      // the method to use more than 15 registers we redo allocation disallowing argument
+      // the method to use more than 16 registers we redo allocation disallowing argument
       // reuse. This very rarely happens in practice (12 methods on GMSCore v4 hits that case).
       insertMoves();
-      if (registersUsed() > MAX_SMALL_REGISTER) {
+      if (highestUsedRegister() > MAX_SMALL_REGISTER) {
         // Redo allocation disallowing argument reuse. This always succeeds.
         clearRegisterAssignments();
         removeSpillAndPhiMoves();
@@ -263,10 +272,8 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
     ranges.sort(LocalRange::compareTo);
 
     // For each debug position compute the set of live locals.
-    // The previously known locals is used to share locals when unchanged.
     boolean localsChanged = false;
-    ImmutableMap<Integer, DebugLocalInfo> previousLocals = ImmutableMap.of();
-    Map<Integer, DebugLocalInfo> currentLocals = new HashMap<>();
+    Int2ReferenceMap<DebugLocalInfo> currentLocals = new Int2ReferenceOpenHashMap<>();
 
     LinkedList<LocalRange> openRanges = new LinkedList<>();
     Iterator<LocalRange> rangeIterator = ranges.iterator();
@@ -277,57 +284,87 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
       currentLocals.put(nextStartingRange.register, nextStartingRange.local);
       openRanges.add(nextStartingRange);
       nextStartingRange = rangeIterator.hasNext() ? rangeIterator.next() : null;
-      localsChanged = true;
     }
 
     for (BasicBlock block : blocks) {
-      Iterator<Instruction> instructionIterator = block.getInstructions().iterator();
+      boolean blockEntry = true;
+      ListIterator<Instruction> instructionIterator = block.listIterator();
       while (instructionIterator.hasNext()) {
         Instruction instruction = instructionIterator.next();
-        // Remove any local-read instructions now that live ranges are computed.
-        if (instruction.isDebugLocalRead()) {
-          instructionIterator.remove();
-          continue;
-        }
-        if (!instruction.isDebugPosition()) {
-          continue;
-        }
         int index = instruction.getNumber();
         ListIterator<LocalRange> it = openRanges.listIterator(0);
+        Int2ReferenceMap<DebugLocalInfo> ending = new Int2ReferenceOpenHashMap<>();
+        Int2ReferenceMap<DebugLocalInfo> starting = new Int2ReferenceOpenHashMap<>();
         while (it.hasNext()) {
           LocalRange openRange = it.next();
-          if (openRange.end < index) {
+          if (openRange.end <= index) {
             it.remove();
             assert currentLocals.get(openRange.register) == openRange.local;
-            currentLocals.put(openRange.register, null);
+            currentLocals.remove(openRange.register);
             localsChanged = true;
+            ending.put(openRange.register, openRange.local);
           }
         }
         while (nextStartingRange != null && nextStartingRange.start <= index) {
           // If the full range is between the two debug positions ignore it.
-          if (nextStartingRange.end >= index) {
+          if (nextStartingRange.end > index) {
             openRanges.add(nextStartingRange);
-            assert currentLocals.get(nextStartingRange.register) == null;
+            assert !currentLocals.containsKey(nextStartingRange.register);
             currentLocals.put(nextStartingRange.register, nextStartingRange.local);
+            starting.put(nextStartingRange.register, nextStartingRange.local);
             localsChanged = true;
           }
           nextStartingRange = rangeIterator.hasNext() ? rangeIterator.next() : null;
         }
-        DebugPosition position = instruction.asDebugPosition();
-        if (localsChanged) {
-          ImmutableMap.Builder<Integer, DebugLocalInfo> locals = ImmutableMap.builder();
-          for (Map.Entry<Integer, DebugLocalInfo> entry : currentLocals.entrySet()) {
-            if (entry.getValue() != null) {
-              locals.put(entry);
+        if (blockEntry) {
+          blockEntry = false;
+          block.setLocalsAtEntry(new Int2ReferenceOpenHashMap<>(currentLocals));
+        } else if (localsChanged && shouldEmitChangesAtInstruction(instruction)) {
+          DebugLocalsChange change = createLocalsChange(ending, starting);
+          if (change != null) {
+            if (instruction.isDebugPosition() || instruction.isJumpInstruction()) {
+              instructionIterator.previous();
+              instructionIterator.add(new DebugLocalsChange(ending, starting));
+              instructionIterator.next();
+            } else {
+              instructionIterator.add(new DebugLocalsChange(ending, starting));
             }
           }
-          localsChanged = false;
-          previousLocals = locals.build();
         }
-        assert verifyLocalsEqual(previousLocals, currentLocals);
-        position.setLocals(previousLocals);
+        localsChanged = false;
       }
     }
+  }
+
+  private DebugLocalsChange createLocalsChange(
+      Int2ReferenceMap<DebugLocalInfo> ending, Int2ReferenceMap<DebugLocalInfo> starting) {
+    if (ending.isEmpty() || starting.isEmpty()) {
+      return new DebugLocalsChange(ending, starting);
+    }
+    IntSet unneeded = new IntArraySet(Math.min(ending.size(), starting.size()));
+    for (Int2ReferenceMap.Entry<DebugLocalInfo> entry : ending.int2ReferenceEntrySet()) {
+      if (starting.get(entry.getIntKey()) == entry.getValue()) {
+        unneeded.add(entry.getIntKey());
+      }
+    }
+    if (unneeded.size() == ending.size() && unneeded.size() == starting.size()) {
+      return null;
+    }
+    IntIterator iterator = unneeded.iterator();
+    while (iterator.hasNext()) {
+      int key = iterator.nextInt();
+      ending.remove(key);
+      starting.remove(key);
+    }
+    return new DebugLocalsChange(ending, starting);
+  }
+
+  private boolean shouldEmitChangesAtInstruction(Instruction instruction) {
+    BasicBlock block = instruction.getBlock();
+    // We emit local changes on all non-exit instructions or, since we have only a singe return
+    // block, any exits directly targeting that.
+    return instruction != block.exit()
+        || (instruction.isGoto() && instruction.asGoto().getTarget() == code.getNormalExitBlock());
   }
 
   private boolean verifyLocalsEqual(
@@ -399,6 +436,10 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
         getRegisterForValue(value, instructionNumber) + value.requiredRegisters() - 1);
   }
 
+  public int highestUsedRegister() {
+    return registersUsed() - 1;
+  }
+
   @Override
   public int registersUsed() {
     int numberOfRegister = maxRegisterNumber + 1 - NUMBER_OF_SENTINEL_REGISTERS;
@@ -467,7 +508,7 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
       assert intervals.getRegisterLimit() == Constants.U16BIT_MAX;
       boolean canUseArgumentRegister = true;
       for (LiveIntervals child : intervals.getSplitChildren()) {
-        if (child.getRegisterLimit() < registersUsed()) {
+        if (child.getRegisterLimit() < highestUsedRegister()) {
           canUseArgumentRegister = false;
           break;
         }
@@ -565,18 +606,18 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
         active.add(argumentInterval);
       } else {
         // Treat the argument interval as spilled which will require a load to a different
-        // register for all usages.
+        // register for all register-constrained usages.
         if (argumentInterval.getUses().size() > 1) {
           LiveIntervalsUse use = argumentInterval.firstUseWithConstraint();
           if (use != null) {
             LiveIntervals split;
-            if (argumentInterval.getUses().size() == 2) {
-              // If there is only one real use (definition plus one real use), split before
+            if (argumentInterval.numberOfUsesWithConstraint() == 1) {
+              // If there is only one register-constrained use, split before
               // that one use.
               split = argumentInterval.splitBefore(use.getPosition());
             } else {
-              // If there are multiple real users, split right after the definition to make it
-              // more likely that arguments get in usable registers from the start.
+              // If there are multiple register-constrained users, split right after the definition
+              // to make it more likely that arguments get in usable registers from the start.
               split = argumentInterval
                   .splitBefore(argumentInterval.getValue().definition.getNumber() + 1);
             }
@@ -642,6 +683,10 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
       // consecutive arguments now and add hints to the move sources. This looks forward
       // and propagate hints backwards to avoid many moves in connection with ranged invokes.
       allocateArgumentIntervalsWithSrc(unhandledInterval);
+      if (unhandledInterval.getRegister() != NO_REGISTER) {
+        // The value itself could be in the chain that has now gotten registers allocated.
+        continue;
+      }
 
       int start = unhandledInterval.getStart();
       // Check for active intervals that expired or became inactive.
@@ -916,17 +961,24 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
 
     if (mode == ArgumentReuseMode.ALLOW_ARGUMENT_REUSE) {
       // The sentinel registers cannot be used and we block them.
-      freePositions.set(0, 0);
+      freePositions.set(0, 0, false);
+      if (options.debug && !code.method.accessFlags.isStatic()) {
+        // If we are generating debug information, we pin the this value register since the
+        // debugger expects to always be able to find it in the input register.
+        assert numberOfArgumentRegisters > 0;
+        assert preArgumentSentinelValue.getNextConsecutive().requiredRegisters() == 1;
+        freePositions.set(1, 0, false);
+      }
       int lastSentinelRegister = numberOfArgumentRegisters + NUMBER_OF_SENTINEL_REGISTERS - 1;
       if (lastSentinelRegister <= registerConstraint) {
-        freePositions.set(lastSentinelRegister, 0);
+        freePositions.set(lastSentinelRegister, 0, false);
       }
     } else {
       // Argument reuse is not allowed and we block all the argument registers so that
       // arguments are never free.
       for (int i = 0; i < numberOfArgumentRegisters + NUMBER_OF_SENTINEL_REGISTERS; i++) {
         if (i <= registerConstraint) {
-          freePositions.set(i, 0);
+          freePositions.set(i, 0, false);
         }
       }
     }
@@ -938,7 +990,7 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
     if (hasDedicatedMoveExceptionRegister) {
       int moveExceptionRegister = numberOfArgumentRegisters + NUMBER_OF_SENTINEL_REGISTERS;
       if (moveExceptionRegister <= registerConstraint) {
-        freePositions.set(moveExceptionRegister, 0);
+        freePositions.set(moveExceptionRegister, 0, false);
       }
     }
 
@@ -948,7 +1000,7 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
       if (activeRegister <= registerConstraint) {
         for (int i = 0; i < intervals.requiredRegisters(); i++) {
           if (activeRegister + i <= registerConstraint) {
-            freePositions.set(activeRegister + i, 0);
+            freePositions.set(activeRegister + i, 0, intervals.isConstantNumberInterval());
           }
         }
       }
@@ -961,17 +1013,18 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
       if (inactiveRegister <= registerConstraint && unhandledInterval.overlaps(intervals)) {
         int nextOverlap = unhandledInterval.nextOverlap(intervals);
         for (int i = 0; i < intervals.requiredRegisters(); i++) {
-          if (inactiveRegister + i <= registerConstraint) {
+          int register = inactiveRegister + i;
+          if (register <= registerConstraint) {
             int unhandledStart = toInstructionPosition(unhandledInterval.getStart());
             if (nextOverlap == unhandledStart) {
               // Don't use the register for an inactive interval that is only free until the next
               // instruction. We can get into this situation when unhandledInterval starts at a
               // gap position.
-              freePositions.set(inactiveRegister + i, 0);
+              freePositions.set(register, 0, freePositions.holdsConstant(register));
             } else {
-              freePositions.set(
-                  inactiveRegister + i,
-                  Math.min(freePositions.get(inactiveRegister + i), nextOverlap));
+              if (nextOverlap < freePositions.get(register)) {
+                freePositions.set(register, nextOverlap, intervals.isConstantNumberInterval());
+              }
             }
           }
         }
@@ -986,7 +1039,8 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
     // Get the register (pair) that is free the longest. That is the register with the largest
     // free position.
     int candidate = getLargestValidCandidate(
-        unhandledInterval, registerConstraint, needsRegisterPair, freePositions);
+        unhandledInterval, registerConstraint, needsRegisterPair, freePositions, false);
+    assert candidate != REGISTER_CANDIDATE_NOT_FOUND;
     int largestFreePosition = freePositions.get(candidate);
     if (needsRegisterPair) {
       largestFreePosition = Math.min(largestFreePosition, freePositions.get(candidate + 1));
@@ -1000,7 +1054,24 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
         // argument reuse disallowed.
         return false;
       }
-      allocateBlockedRegister(unhandledInterval);
+      // If the first use for these intervals is unconstrained, just spill this interval instead
+      // of finding another candidate to spill via allocateBlockedRegister.
+      if (!unhandledInterval.getUses().first().hasConstraint()) {
+        int nextConstrainedPosition = unhandledInterval.firstUseWithConstraint().getPosition();
+        int register;
+        // Arguments are always in the argument registers, so for arguments just use that register
+        // for the unconstrained prefix. For everything else, get a spill register.
+        if (unhandledInterval.isArgumentInterval()) {
+          register = unhandledInterval.getSplitParent().getRegister();
+        } else {
+          register = getSpillRegister(unhandledInterval);
+        }
+        LiveIntervals split = unhandledInterval.splitBefore(nextConstrainedPosition);
+        assignRegisterToUnhandledInterval(unhandledInterval, needsRegisterPair, register);
+        unhandled.add(split);
+      } else {
+        allocateBlockedRegister(unhandledInterval);
+      }
     } else if (largestFreePosition >= unhandledInterval.getEnd()) {
       // Free for the entire interval. Allocate the register.
       assignRegisterToUnhandledInterval(unhandledInterval, needsRegisterPair, candidate);
@@ -1012,8 +1083,7 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
       }
       // The candidate is free for the beginning of an interval. We split the interval
       // and use the register for as long as we can.
-      int splitPosition = largestFreePosition;
-      LiveIntervals split = unhandledInterval.splitBefore(splitPosition);
+      LiveIntervals split = unhandledInterval.splitBefore(largestFreePosition);
       assert split != unhandledInterval;
       assignRegisterToUnhandledInterval(unhandledInterval, needsRegisterPair, candidate);
       unhandled.add(split);
@@ -1138,14 +1208,15 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
     active.add(unhandledInterval);
   }
 
-  private int getLargestCandidate(
-      int registerConstraint, RegisterPositions freePositions, boolean needsRegisterPair) {
-    int candidate = 0;
-    int largest = freePositions.get(0);
-    if (needsRegisterPair) {
-      largest = Math.min(largest, freePositions.get(1));
-    }
-    for (int i = 1; i <= registerConstraint; i++) {
+  private int getLargestCandidate(int registerConstraint, RegisterPositions freePositions,
+      boolean needsRegisterPair, boolean restrictToConstant) {
+    int candidate = REGISTER_CANDIDATE_NOT_FOUND;
+    int largest = -1;
+
+    for (int i = 0; i <= registerConstraint; i++) {
+      if (restrictToConstant && !freePositions.holdsConstant(i)) {
+        continue;
+      }
       int freePosition = freePositions.get(i);
       if (needsRegisterPair) {
         if (i >= registerConstraint) {
@@ -1161,17 +1232,23 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
         }
       }
     }
+
     return candidate;
   }
 
   private int getLargestValidCandidate(LiveIntervals unhandledInterval, int registerConstraint,
-      boolean needsRegisterPair, RegisterPositions freePositions) {
-    int candidate = getLargestCandidate(registerConstraint, freePositions, needsRegisterPair);
+      boolean needsRegisterPair, RegisterPositions freePositions, boolean restrictToConstant) {
+    int candidate = getLargestCandidate(registerConstraint, freePositions, needsRegisterPair,
+        restrictToConstant);
+    if (candidate == REGISTER_CANDIDATE_NOT_FOUND) {
+      return candidate;
+    }
     if (needsOverlappingLongRegisterWorkaround(unhandledInterval)) {
       while (hasOverlappingLongRegisters(unhandledInterval, candidate)) {
         // Make the overlapping register unavailable for allocation and try again.
-        freePositions.set(candidate, 0);
-        candidate = getLargestCandidate(registerConstraint, freePositions, needsRegisterPair);
+        freePositions.set(candidate, 0, freePositions.holdsConstant(candidate));
+        candidate = getLargestCandidate(registerConstraint, freePositions, needsRegisterPair,
+            restrictToConstant);
       }
     }
     return candidate;
@@ -1198,7 +1275,8 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
         for (int i = 0; i < intervals.requiredRegisters(); i++) {
           if (activeRegister + i <= registerConstraint) {
             int unhandledStart = unhandledInterval.getStart();
-            usePositions.set(activeRegister + i, intervals.firstUseAfter(unhandledStart));
+            usePositions.set(activeRegister + i, intervals.firstUseAfter(unhandledStart),
+                intervals.isConstantNumberInterval());
           }
         }
       }
@@ -1210,9 +1288,11 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
       if (inactiveRegister <= registerConstraint && intervals.overlaps(unhandledInterval)) {
         for (int i = 0; i < intervals.requiredRegisters(); i++) {
           if (inactiveRegister + i <= registerConstraint) {
-            int unhandledStart = unhandledInterval.getStart();
-            usePositions.set(inactiveRegister + i, Math.min(
-                usePositions.get(inactiveRegister + i), intervals.firstUseAfter(unhandledStart)));
+            int firstUse = intervals.firstUseAfter(unhandledInterval.getStart());
+            if (firstUse < usePositions.get(inactiveRegister + i)) {
+              usePositions.set(inactiveRegister + i, firstUse,
+                  intervals.isConstantNumberInterval());
+            }
           }
         }
       }
@@ -1221,38 +1301,46 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
     // Disallow the reuse of argument registers by always treating them as being used
     // at instruction number 0.
     for (int i = 0; i < numberOfArgumentRegisters + NUMBER_OF_SENTINEL_REGISTERS; i++) {
-      usePositions.set(i, 0);
+      usePositions.set(i, 0, false);
     }
 
     // Disallow reuse of the move exception register if we have reserved one.
     if (hasDedicatedMoveExceptionRegister) {
-      usePositions.set(numberOfArgumentRegisters + NUMBER_OF_SENTINEL_REGISTERS, 0);
+      usePositions.set(numberOfArgumentRegisters + NUMBER_OF_SENTINEL_REGISTERS, 0, false);
     }
 
     // Treat active linked argument intervals as pinned. They cannot be given another register
     // at their uses.
-    blockLinkedRegisters(
-        active, unhandledInterval, registerConstraint, usePositions, blockedPositions);
+    blockLinkedRegisters(active, unhandledInterval, registerConstraint, usePositions,
+        blockedPositions);
 
     // Treat inactive linked argument intervals as pinned. They cannot be given another register
     // at their uses.
-    blockLinkedRegisters(
-        inactive, unhandledInterval, registerConstraint, usePositions, blockedPositions);
+    blockLinkedRegisters(inactive, unhandledInterval, registerConstraint, usePositions,
+        blockedPositions);
 
     // Get the register (pair) that has the highest use position.
     boolean needsRegisterPair = unhandledInterval.requiredRegisters() == 2;
-    int candidate = getLargestValidCandidate(
-        unhandledInterval, registerConstraint, needsRegisterPair, usePositions);
-    int largestUsePosition = usePositions.get(candidate);
-    int blockedPosition = blockedPositions.get(candidate);
-    if (needsRegisterPair) {
-      blockedPosition = Math.min(blockedPosition, blockedPositions.get(candidate + 1));
-      largestUsePosition = Math.min(largestUsePosition, usePositions.get(candidate + 1));
+
+    int candidate = getLargestValidCandidate(unhandledInterval, registerConstraint,
+        needsRegisterPair, usePositions, true);
+    if (candidate != Integer.MAX_VALUE) {
+      int nonConstCandidate = getLargestValidCandidate(unhandledInterval, registerConstraint,
+          needsRegisterPair, usePositions, false);
+      if (nonConstCandidate == Integer.MAX_VALUE || candidate == REGISTER_CANDIDATE_NOT_FOUND) {
+        candidate = nonConstCandidate;
+      } else {
+        int largestConstUsePosition = getLargestPosition(usePositions, candidate, needsRegisterPair);
+        if (largestConstUsePosition - MIN_CONSTANT_FREE_FOR_POSITIONS < unhandledInterval
+            .getStart()) {
+          // The candidate that can be rematerialized has a live range too short to use it.
+          candidate = nonConstCandidate;
+        }
+      }
     }
 
-    // TODO(ager): When selecting a spill candidate also take rematerialization into account.
-    // Prefer spilling a constant that can be rematerialized instead of spilling something that
-    // cannot be rematerialized.
+    int largestUsePosition = getLargestPosition(usePositions, candidate, needsRegisterPair);
+    int blockedPosition = getBlockedPosition(blockedPositions, candidate, needsRegisterPair);
 
     if (largestUsePosition < unhandledInterval.getFirstUse()) {
       // All active and inactive intervals are used before current. Therefore, it is best to spill
@@ -1277,6 +1365,28 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
       unhandled.add(splitChild);
       assignRegisterAndSpill(unhandledInterval, needsRegisterPair, candidate);
     }
+  }
+
+  private int getLargestPosition(RegisterPositions usePositions, int register,
+      boolean needsRegisterPair) {
+    int largestUsePosition = usePositions.get(register);
+
+    if (needsRegisterPair) {
+      largestUsePosition = Math.min(largestUsePosition, usePositions.get(register + 1));
+    }
+
+    return largestUsePosition;
+  }
+
+  private int getBlockedPosition(RegisterPositions blockedPositions, int register,
+      boolean needsRegisterPair) {
+    int blockedPosition = blockedPositions.get(register);
+
+    if (needsRegisterPair) {
+      blockedPosition = Math.min(blockedPosition, blockedPositions.get(register + 1));
+    }
+
+    return blockedPosition;
   }
 
   private void assignRegisterAndSpill(
@@ -1456,15 +1566,12 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
         if (register <= registerConstraint && other.overlaps(interval)) {
           for (int i = 0; i < other.requiredRegisters(); i++) {
             if (register + i <= registerConstraint) {
-              for (LiveIntervalsUse use : other.getUses()) {
-                if (use.getPosition() > interval.getStart()) {
-                  blockedPositions.set(
-                      register + i,
-                      Math.min(blockedPositions.get(register + i), use.getPosition()));
-                  usePositions.set(
-                      register + i,
-                      Math.min(usePositions.get(register + i), use.getPosition()));
-                }
+              int firstUse = other.firstUseAfter(interval.getStart());
+              if (firstUse < blockedPositions.get(register + i)) {
+                blockedPositions.set(register + i, firstUse, other.isConstantNumberInterval());
+                // If we start blocking registers other than linked arguments, we might need to
+                // explicitly update the use positions as well as blocked positions.
+                assert usePositions.get(register + i) <= blockedPositions.get(register + i);
               }
             }
           }
@@ -1603,10 +1710,16 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
             live.add(use);
           }
         }
-        Value use = instruction.getPreviousLocalValue();
-        if (use != null) {
-          assert use.needsRegister();
-          live.add(use);
+        if (options.debug) {
+          for (Value use : instruction.getDebugValues()) {
+            assert use.needsRegister();
+            live.add(use);
+          }
+          Value use = instruction.getPreviousLocalValue();
+          if (use != null) {
+            assert use.needsRegister();
+            live.add(use);
+          }
         }
       }
       for (Phi phi : block.getPhis()) {
@@ -1723,15 +1836,27 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
                 new LiveIntervalsUse(instruction.getNumber(), instruction.maxInValueRegister()));
           }
         }
-        Value use = instruction.getPreviousLocalValue();
-        if (use != null) {
-          assert use.needsRegister();
-          if (!live.contains(use)) {
-            live.add(use);
-            addLiveRange(use, block, instruction.getNumber());
+        if (options.debug) {
+          int number = instruction.getNumber();
+          for (Value use : instruction.getDebugValues()) {
+            assert use.needsRegister();
+            if (!live.contains(use)) {
+              live.add(use);
+              addLiveRange(use, block, number);
+            }
+            LiveIntervals useIntervals = use.getLiveIntervals();
+            useIntervals.addUse(new LiveIntervalsUse(number, Constants.U16BIT_MAX, true));
           }
-          LiveIntervals useIntervals = use.getLiveIntervals();
-          useIntervals.addUse(new LiveIntervalsUse(instruction.getNumber(), Constants.U16BIT_MAX));
+          Value use = instruction.getPreviousLocalValue();
+          if (use != null) {
+            assert use.needsRegister();
+            if (!live.contains(use)) {
+              live.add(use);
+              addLiveRange(use, block, number);
+            }
+            LiveIntervals useIntervals = use.getLiveIntervals();
+            useIntervals.addUse(new LiveIntervalsUse(number, Constants.U16BIT_MAX, true));
+          }
         }
       }
     }
@@ -1741,8 +1866,8 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
     code.blocks.forEach(BasicBlock::clearUserInfo);
   }
 
-  private Value createValue(MoveType type, DebugInfo debugInfo) {
-    Value value = code.createValue(type, debugInfo);
+  private Value createValue(MoveType type) {
+    Value value = code.createValue(type, null);
     value.setNeedsRegister(true);
     return value;
   }
@@ -1762,7 +1887,10 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
       Value previous = null;
       for (int i = 0; i < arguments.size(); i++) {
         Value argument = arguments.get(i);
-        Value newArgument = createValue(argument.outType(), argument.getDebugInfo());
+        // TODO(ager): Conditionally create a new argument if it is not already a move.
+        // Reverted optimization from CL: https://r8-review.googlesource.com/c/1985/
+        // Not considering debug-uses causes a unlinked/non-consecutive register in some cases.
+        Value newArgument = createValue(argument.outType());
         Move move = new Move(newArgument, argument);
         move.setBlock(invoke.getBlock());
         replaceArgument(invoke, i, newArgument);
@@ -1789,7 +1917,7 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
   }
 
   private Value createSentinelRegisterValue() {
-    return createValue(MoveType.OBJECT, null);
+    return createValue(MoveType.OBJECT);
   }
 
   private LiveIntervals createSentinelLiveInterval(Value sentinelValue) {
@@ -1870,7 +1998,7 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
       // Pin the argument register. We use getFreeConsecutiveRegisters to make sure that we update
       // the max register number.
       register = getFreeConsecutiveRegisters(argumentLiveInterval.requiredRegisters());
-      argumentLiveInterval.setRegister(register);
+      assignRegister(argumentLiveInterval, register);
       current = current.getNextConsecutive();
     }
     assert register == numberOfArgumentRegisters + NUMBER_OF_SENTINEL_REGISTERS - 1;

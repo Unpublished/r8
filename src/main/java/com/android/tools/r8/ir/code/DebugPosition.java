@@ -4,18 +4,14 @@
 package com.android.tools.r8.ir.code;
 
 import com.android.tools.r8.errors.Unreachable;
-import com.android.tools.r8.graph.DebugLocalInfo;
 import com.android.tools.r8.graph.DexString;
 import com.android.tools.r8.ir.conversion.DexBuilder;
 import com.android.tools.r8.utils.InternalOptions;
-import com.android.tools.r8.utils.StringUtils;
-import com.google.common.collect.ImmutableMap;
 
 public class DebugPosition extends Instruction {
 
   public final int line;
   public final DexString file;
-  private ImmutableMap<Integer, DebugLocalInfo> locals;
 
   public DebugPosition(int line, DexString file) {
     super(null);
@@ -35,7 +31,7 @@ public class DebugPosition extends Instruction {
 
   @Override
   public void buildDex(DexBuilder builder) {
-    builder.addNop(this);
+    builder.addDebugPosition(this);
   }
 
   @Override
@@ -61,7 +57,7 @@ public class DebugPosition extends Instruction {
   }
 
   @Override
-  public boolean canBeDeadCode(InternalOptions options) {
+  public boolean canBeDeadCode(IRCode code, InternalOptions options) {
     return false;
   }
 
@@ -72,18 +68,6 @@ public class DebugPosition extends Instruction {
       builder.append(file).append(":");
     }
     builder.append(line);
-    if (locals != null && !locals.isEmpty()) {
-      builder.append(", locals: ");
-      StringUtils.append(builder, locals.values());
-    }
     return builder.toString();
-  }
-
-  public void setLocals(ImmutableMap<Integer, DebugLocalInfo> locals) {
-    this.locals = locals;
-  }
-
-  public ImmutableMap<Integer, DebugLocalInfo> getLocals() {
-    return locals;
   }
 }

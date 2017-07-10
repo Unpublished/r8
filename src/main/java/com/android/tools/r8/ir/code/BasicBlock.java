@@ -4,13 +4,16 @@
 package com.android.tools.r8.ir.code;
 
 import com.android.tools.r8.errors.CompilationError;
+import com.android.tools.r8.graph.DebugLocalInfo;
 import com.android.tools.r8.graph.DexType;
 import com.android.tools.r8.ir.conversion.DexBuilder;
 import com.android.tools.r8.ir.conversion.IRBuilder;
 import com.android.tools.r8.utils.CfgPrinter;
 import com.android.tools.r8.utils.ListUtils;
 import com.android.tools.r8.utils.StringUtils;
+import com.android.tools.r8.utils.StringUtils.BraceType;
 import com.google.common.collect.ImmutableList;
+import it.unimi.dsi.fastutil.ints.Int2ReferenceMap;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -30,6 +33,16 @@ import java.util.function.Function;
  * Basic block abstraction.
  */
 public class BasicBlock {
+
+  private Int2ReferenceMap<DebugLocalInfo> localsAtEntry;
+
+  public void setLocalsAtEntry(Int2ReferenceMap<DebugLocalInfo> localsAtEntry) {
+    this.localsAtEntry = localsAtEntry;
+  }
+
+  public Int2ReferenceMap<DebugLocalInfo> getLocalsAtEntry() {
+    return localsAtEntry;
+  }
 
   public enum ThrowingInfo {
     NO_THROW, CAN_THROW
@@ -260,6 +273,12 @@ public class BasicBlock {
       }
     }
     assert false : "replaceSuccessor did not find the predecessor to replace";
+  }
+
+  public void swapSuccessorsByIndex(int index1, int index2) {
+    BasicBlock t = successors.get(index1);
+    successors.set(index1, successors.get(index2));
+    successors.set(index2, t);
   }
 
   public void removeSuccessorsByIndex(List<Integer> successorsToRemove) {
@@ -535,6 +554,9 @@ public class BasicBlock {
           for (Value value : instruction.inValues) {
             value.removeUser(instruction);
           }
+          for (Value value : instruction.getDebugValues()) {
+            value.removeDebugUser(instruction);
+          }
           Value previousLocalValue = instruction.getPreviousLocalValue();
           if (previousLocalValue != null) {
             previousLocalValue.removeDebugUser(instruction);
@@ -761,6 +783,11 @@ public class BasicBlock {
     } else {
       builder.append("no phis\n");
     }
+    if (localsAtEntry != null) {
+      builder.append("locals: ");
+      StringUtils.append(builder, localsAtEntry.int2ReferenceEntrySet(), ", ", BraceType.NONE);
+      builder.append("\n");
+    }
     for (Instruction instruction : instructions) {
       StringUtils.appendLeftPadded(builder, Integer.toString(instruction.getNumber()), 6);
       builder.append(": ");
@@ -976,6 +1003,17 @@ public class BasicBlock {
 
   public InstructionListIterator listIterator(int index) {
     return new BasicBlockInstructionIterator(this, index);
+  }
+
+  /**
+   * Creates an instruction list iterator starting at <code>instruction</code>.
+   *
+   * The cursor will be positioned after <code>instruction</code>. Calling <code>next</code> on
+   * the returned iterator will return the instruction after <code>instruction</code>. Calling
+   * <code>previous</code> will return <code>instruction</code>.
+   */
+  public InstructionListIterator listIterator(Instruction instruction) {
+    return new BasicBlockInstructionIterator(this, instruction);
   }
 
   /**

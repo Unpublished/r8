@@ -3,6 +3,7 @@
 // BSD-style license that can be found in the LICENSE file.
 package com.android.tools.r8.ir.code;
 
+import com.android.tools.r8.dex.Constants;
 import com.android.tools.r8.graph.DebugLocalInfo;
 import com.android.tools.r8.ir.regalloc.LiveIntervals;
 import com.android.tools.r8.utils.InternalOptions;
@@ -39,8 +40,8 @@ public class Value {
     final DebugLocalInfo local;
     Value previousLocalValue;
     Set<Instruction> debugUsers = new HashSet<>();
-    List<DebugLocalRead> localStarts = new ArrayList<>();
-    List<DebugLocalRead> localEnds = new ArrayList<>();
+    List<Instruction> localStarts = new ArrayList<>();
+    List<Instruction> localEnds = new ArrayList<>();
 
     DebugData(DebugInfo info) {
       this(info.local, info.previousLocalValue);
@@ -114,20 +115,20 @@ public class Value {
     }
   }
 
-  public List<DebugLocalRead> getDebugLocalStarts() {
+  public List<Instruction> getDebugLocalStarts() {
     return debugData.localStarts;
   }
 
-  public List<DebugLocalRead> getDebugLocalEnds() {
+  public List<Instruction> getDebugLocalEnds() {
     return debugData.localEnds;
   }
 
-  public void addDebugLocalStart(DebugLocalRead start) {
+  public void addDebugLocalStart(Instruction start) {
     assert start != null;
     debugData.localStarts.add(start);
   }
 
-  public void addDebugLocalEnd(DebugLocalRead end) {
+  public void addDebugLocalEnd(Instruction end) {
     assert end != null;
     debugData.localEnds.add(end);
   }
@@ -252,7 +253,6 @@ public class Value {
     if (isUninitializedLocal()) {
       return;
     }
-    assert !debugData.debugUsers.contains(user);
     debugData.debugUsers.add(user);
   }
 
@@ -306,6 +306,13 @@ public class Value {
     }
     if (debugData != null) {
       for (Instruction user : debugUsers()) {
+        user.getDebugValues().replaceAll(v -> {
+          if (v == this) {
+            newValue.addDebugUser(user);
+            return newValue;
+          }
+          return v;
+        });
         if (user.getPreviousLocalValue() == this) {
           newValue.addDebugUser(user);
           user.replacePreviousLocalValue(newValue);
@@ -341,9 +348,6 @@ public class Value {
   }
 
   public boolean internalComputeNeedsRegister() {
-    if (getLocalInfo() != null) {
-      return true;
-    }
     if (!isConstant()) {
       return true;
     }
@@ -352,6 +356,15 @@ public class Value {
     }
     for (Instruction user : uniqueUsers()) {
       if (user.needsValueInRegister(this)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  public boolean hasRegisterConstraint() {
+    for (Instruction instruction : uniqueUsers()) {
+      if (instruction.maxInValueRegister() != Constants.U16BIT_MAX) {
         return true;
       }
     }
@@ -368,7 +381,7 @@ public class Value {
     StringBuilder builder = new StringBuilder();
     builder.append("v");
     builder.append(number);
-    boolean isConstant = definition != null && isConstant();
+    boolean isConstant = definition != null && definition.isConstNumber();
     boolean hasLocalInfo = getLocalInfo() != null;
     if (isConstant || hasLocalInfo) {
       builder.append("(");
@@ -380,8 +393,11 @@ public class Value {
           builder.append(constNumber.getRawValue());
         }
       }
+      if (isConstant && hasLocalInfo) {
+        builder.append(", ");
+      }
       if (hasLocalInfo) {
-        builder.append(", ").append(getLocalInfo());
+        builder.append(getLocalInfo());
       }
       builder.append(")");
     }
@@ -396,12 +412,12 @@ public class Value {
   }
 
   public ConstInstruction getConstInstruction() {
-    assert definition.isOutConstant();
+    assert isConstant();
     return definition.getOutConstantConstInstruction();
   }
 
   public boolean isConstant() {
-    return definition.isOutConstant();
+    return definition.isOutConstant() && getLocalInfo() == null;
   }
 
   public boolean isPhi() {
@@ -500,7 +516,7 @@ public class Value {
     // currently active values.
     active.add(this);
     for (Instruction instruction : uniqueUsers()) {
-      if (!instruction.canBeDeadCode(options)) {
+      if (!instruction.canBeDeadCode(null, options)) {
         return false;
       }
       Value outValue = instruction.outValue();

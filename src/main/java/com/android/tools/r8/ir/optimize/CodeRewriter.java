@@ -23,11 +23,11 @@ import com.android.tools.r8.ir.code.Cmp;
 import com.android.tools.r8.ir.code.Cmp.Bias;
 import com.android.tools.r8.ir.code.ConstNumber;
 import com.android.tools.r8.ir.code.ConstString;
-import com.android.tools.r8.ir.code.ConstType;
 import com.android.tools.r8.ir.code.DominatorTree;
 import com.android.tools.r8.ir.code.Goto;
 import com.android.tools.r8.ir.code.IRCode;
 import com.android.tools.r8.ir.code.If;
+import com.android.tools.r8.ir.code.If.Type;
 import com.android.tools.r8.ir.code.Instruction;
 import com.android.tools.r8.ir.code.InstructionIterator;
 import com.android.tools.r8.ir.code.InstructionListIterator;
@@ -35,7 +35,6 @@ import com.android.tools.r8.ir.code.Invoke;
 import com.android.tools.r8.ir.code.InvokeDirect;
 import com.android.tools.r8.ir.code.InvokeMethod;
 import com.android.tools.r8.ir.code.InvokeVirtual;
-import com.android.tools.r8.ir.code.JumpInstruction;
 import com.android.tools.r8.ir.code.MemberType;
 import com.android.tools.r8.ir.code.MoveType;
 import com.android.tools.r8.ir.code.NewArrayEmpty;
@@ -46,8 +45,8 @@ import com.android.tools.r8.ir.code.Return;
 import com.android.tools.r8.ir.code.StaticGet;
 import com.android.tools.r8.ir.code.StaticPut;
 import com.android.tools.r8.ir.code.Switch;
-import com.android.tools.r8.ir.code.Switch.Type;
 import com.android.tools.r8.ir.code.Value;
+import com.android.tools.r8.ir.conversion.OptimizationFeedback;
 import com.android.tools.r8.utils.InternalOptions;
 import com.android.tools.r8.utils.LongInterval;
 import com.google.common.base.Equivalence;
@@ -59,10 +58,12 @@ import it.unimi.dsi.fastutil.ints.Int2IntArrayMap;
 import it.unimi.dsi.fastutil.ints.Int2IntMap;
 import it.unimi.dsi.fastutil.ints.Int2ReferenceArrayMap;
 import it.unimi.dsi.fastutil.ints.Int2ReferenceMap;
+import it.unimi.dsi.fastutil.ints.IntArrayList;
+import it.unimi.dsi.fastutil.ints.IntList;
 import it.unimi.dsi.fastutil.objects.Reference2IntArrayMap;
 import it.unimi.dsi.fastutil.objects.Reference2IntMap;
 import java.util.ArrayList;
-import java.util.Arrays;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -78,14 +79,18 @@ public class CodeRewriter {
   private static final int UNKNOWN_CAN_THROW = 0;
   private static final int CAN_THROW = 1;
   private static final int CANNOT_THROW = 2;
-  private static final int MAX_FILL_ARRAY_SIZE = 4 * Constants.KILOBYTE;
+  private static final int MAX_FILL_ARRAY_SIZE = 8 * Constants.KILOBYTE;
+  // This constant was determined by experimentation.
+  private static final int STOP_SHARED_CONSTANT_THRESHOLD = 50;
 
   private final AppInfo appInfo;
   private final DexItemFactory dexItemFactory;
+  private final Set<DexType> libraryClassesWithOptimizationInfo;
 
-  public CodeRewriter(AppInfo appInfo) {
+  public CodeRewriter(AppInfo appInfo, Set<DexType> libraryClassesWithOptimizationInfo) {
     this.appInfo = appInfo;
     this.dexItemFactory = appInfo.dexItemFactory;
+    this.libraryClassesWithOptimizationInfo = libraryClassesWithOptimizationInfo;
   }
 
   /**
@@ -319,6 +324,37 @@ public class CodeRewriter {
     }
   }
 
+  public void rewriteSwitch(IRCode code) {
+    for (BasicBlock block : code.blocks) {
+      InstructionListIterator iterator = block.listIterator();
+      while (iterator.hasNext()) {
+        Instruction instruction = iterator.next();
+        if (instruction.isSwitch()) {
+          Switch theSwitch = instruction.asSwitch();
+          if (theSwitch.numberOfKeys() == 1) {
+            // Rewrite the switch to an if.
+            int fallthroughBlockIndex = theSwitch.getFallthroughBlockIndex();
+            int caseBlockIndex = theSwitch.targetBlockIndices()[0];
+            if (fallthroughBlockIndex < caseBlockIndex) {
+              block.swapSuccessorsByIndex(fallthroughBlockIndex, caseBlockIndex);
+            }
+            if (theSwitch.getFirstKey() == 0) {
+              iterator.replaceCurrentInstruction(new If(Type.EQ, theSwitch.value()));
+            } else {
+              ConstNumber labelConst = code.createIntConstant(theSwitch.getFirstKey());
+              iterator.previous();
+              iterator.add(labelConst);
+              Instruction dummy = iterator.next();
+              assert dummy == theSwitch;
+              If theIf = new If(Type.EQ, ImmutableList.of(theSwitch.value(), labelConst.dest()));
+              iterator.replaceCurrentInstruction(theIf);
+            }
+          }
+        }
+      }
+    }
+  }
+
   /**
    * Inline the indirection of switch maps into the switch statement.
    * <p>
@@ -380,18 +416,20 @@ public class CodeRewriter {
             Reference2IntMap ordinalsMap = extractOrdinalsMapFor(switchMapHolder);
             if (ordinalsMap != null) {
               Int2IntMap targetMap = new Int2IntArrayMap();
-              int keys[] = new int[switchInsn.numberOfKeys()];
-              for (int i = 0; i < keys.length; i++) {
-                keys[i] = ordinalsMap.getInt(indexMap.get(switchInsn.getKey(i)));
-                targetMap.put(keys[i], switchInsn.targetBlockIndices()[i]);
+              IntList keys = new IntArrayList(switchInsn.numberOfKeys());
+              for (int i = 0; i < switchInsn.numberOfKeys(); i++) {
+                assert switchInsn.targetBlockIndices()[i] != switchInsn.getFallthroughBlockIndex();
+                int key = ordinalsMap.getInt(indexMap.get(switchInsn.getKey(i)));
+                keys.add(key);
+                targetMap.put(key, switchInsn.targetBlockIndices()[i]);
               }
-              Arrays.sort(keys);
-              int[] targets = new int[keys.length];
-              for (int i = 0; i < keys.length; i++) {
-                targets[i] = targetMap.get(keys[i]);
+              keys.sort(Comparator.naturalOrder());
+              int[] targets = new int[keys.size()];
+              for (int i = 0; i < keys.size(); i++) {
+                targets[i] = targetMap.get(keys.getInt(i));
               }
 
-              Switch newSwitch = new Switch(Type.SPARSE, ordinalInvoke.outValue(), keys,
+              Switch newSwitch = new Switch(ordinalInvoke.outValue(), keys.toIntArray(),
                   targets, switchInsn.getFallthroughBlockIndex());
               // Replace the switch itself.
               it.replaceCurrentInstruction(newSwitch);
@@ -411,6 +449,7 @@ public class CodeRewriter {
       }
     }
   }
+
 
   /**
    * Extracts the mapping from ordinal values to switch case constants.
@@ -607,7 +646,7 @@ public class CodeRewriter {
   }
 
   public void identifyReturnsArgument(
-      DexEncodedMethod method, IRCode code) {
+      DexEncodedMethod method, IRCode code, OptimizationFeedback feedback) {
     if (code.getNormalExitBlock() != null) {
       Return ret = code.getNormalExitBlock().exit().asReturn();
       if (!ret.isReturnVoid()) {
@@ -616,14 +655,14 @@ public class CodeRewriter {
           // Find the argument number.
           int index = code.collectArguments().indexOf(returnValue);
           assert index != -1;
-          method.markReturnsArgument(index);
+          feedback.methodReturnsArgument(method, index);
         }
         if (returnValue.isConstant() && returnValue.definition.isConstNumber()) {
           long value = returnValue.definition.asConstNumber().getRawValue();
-          method.markReturnsConstant(value);
+          feedback.methodReturnsConstant(method, value);
         }
         if (returnValue.isNeverNull()) {
-          method.markNeverReturnsNull();
+          feedback.methodNeverReturnsNull(method);
         }
       }
     }
@@ -655,6 +694,12 @@ public class CodeRewriter {
         InvokeMethod invoke = current.asInvokeMethod();
         if (invoke.outValue() != null) {
           DexEncodedMethod target = invoke.computeSingleTarget(appInfo.withSubtyping());
+          // We have a set of library classes with optimization information - consider those
+          // as well.
+          if ((target == null) &&
+              libraryClassesWithOptimizationInfo.contains(invoke.getInvokedMethod().getHolder())) {
+            target = appInfo.definitionFor(invoke.getInvokedMethod());
+          }
           if (target != null) {
             DexMethod invokedMethod = target.method;
             // Check if the invoked method is known to return one of its arguments.
@@ -677,6 +722,65 @@ public class CodeRewriter {
       }
     }
     assert code.isConsistentGraph();
+  }
+
+  // For supporting assert javac adds the static field $assertionsDisabled to all classes which
+  // have methods with assertions. This is used to support the Java VM -ea flag.
+  //
+  //  The class:
+  //
+  //  class A {
+  //    void m() {
+  //      assert xxx;
+  //    }
+  //  }
+  //
+  //  Is compiled into:
+  //
+  //  class A {
+  //    static boolean $assertionsDisabled;
+  //    static {
+  //      $assertionsDisabled = A.class.desiredAssertionStatus();
+  //    }
+  //
+  //    // method with "assert xxx";
+  //    void m() {
+  //      if (!$assertionsDisabled) {
+  //        if (xxx) {
+  //          throw new AssertionError(...);
+  //        }
+  //      }
+  //    }
+  //  }
+  //
+  //  With the rewriting below (and other rewritings) the resulting code is:
+  //
+  //  class A {
+  //    void m() {
+  //    }
+  //  }
+  //
+  public void disableAssertions(IRCode code) {
+    InstructionIterator iterator = code.instructionIterator();
+    while (iterator.hasNext()) {
+      Instruction current = iterator.next();
+      if (current.isInvokeMethod()) {
+        InvokeMethod invoke = current.asInvokeMethod();
+        if (invoke.getInvokedMethod() == dexItemFactory.classMethods.desiredAssertionStatus) {
+          iterator.replaceCurrentInstruction(code.createFalse());
+        }
+      } else if (current.isStaticPut()) {
+        StaticPut staticPut = current.asStaticPut();
+        if (staticPut.getField().name == dexItemFactory.assertionsDisabled) {
+          iterator.remove();
+        }
+      } else if (current.isStaticGet()) {
+        StaticGet staticGet = current.asStaticGet();
+        if (staticGet.getField().name == dexItemFactory.assertionsDisabled) {
+          iterator.replaceCurrentInstruction(code.createTrue());
+        }
+      }
+    }
   }
 
   private boolean canBeFolded(Instruction instruction) {
@@ -774,6 +878,7 @@ public class CodeRewriter {
     // Currently, we are only shortening the live range of constants in the entry block.
     // TODO(ager): Generalize this to shorten live ranges for more instructions? Currently
     // doing so seems to make things worse.
+    Map<BasicBlock, List<Instruction>> addConstantInBlock = new HashMap<>();
     DominatorTree dominatorTree = new DominatorTree(code);
     BasicBlock block = code.blocks.get(0);
     InstructionListIterator it = block.listIterator();
@@ -802,15 +907,54 @@ public class CodeRewriter {
         // Move the const instruction as close to its uses as possible.
         it.detach();
         if (dominator != block) {
-          insertConstantInBlock(instruction, dominator);
+          // Post-pone constant insertion in order to use a global heuristics.
+          List<Instruction> csts = addConstantInBlock.get(dominator);
+          if (csts == null) {
+            csts = new ArrayList<>();
+            addConstantInBlock.put(dominator, csts);
+          }
+          csts.add(instruction);
         } else {
           toInsertInThisBlock.add(instruction);
         }
       }
     }
+
+    // Heuristic to decide if constant instructions are shared in dominator block of usages or move
+    // to the usages.
+    for (Map.Entry<BasicBlock, List<Instruction>> entry : addConstantInBlock.entrySet()) {
+      if (entry.getValue().size() > STOP_SHARED_CONSTANT_THRESHOLD) {
+        // Too much constants in the same block, do not longer shared them except if they are used
+        // by phi instructions.
+        for (Instruction instruction : entry.getValue()) {
+          if (instruction.outValue().numberOfPhiUsers() != 0) {
+            // Add constant into the dominator block of usages.
+            insertConstantInBlock(instruction, entry.getKey());
+          } else {
+            assert instruction.outValue().numberOfUsers() != 0;
+            ConstNumber constNumber = instruction.asConstNumber();
+            Value constantValue = instruction.outValue();
+            for (Instruction user : constantValue.uniqueUsers()) {
+              ConstNumber newCstNum = ConstNumber.copyOf(code, constNumber);
+              InstructionListIterator iterator = user.getBlock().listIterator(user);
+              iterator.previous();
+              iterator.add(newCstNum);
+              user.replaceValue(constantValue, newCstNum.outValue());
+            }
+          }
+        }
+      } else {
+        // Add constant into the dominator block of usages.
+        for (Instruction inst : entry.getValue()) {
+          insertConstantInBlock(inst, entry.getKey());
+        }
+      }
+    }
+
     for (Instruction toInsert : toInsertInThisBlock) {
       insertConstantInBlock(toInsert, block);
     }
+    assert code.isConsistentSSA();
   }
 
   private void insertConstantInBlock(Instruction instruction, BasicBlock block) {
@@ -836,8 +980,6 @@ public class CodeRewriter {
     if (elementSize == 1) {
       short[] result = new short[(size + 1) / 2];
       for (int i = 0; i < size; i += 2) {
-        assert values[i].getIntValue() <= Constants.S8BIT_MAX
-            && values[i].getIntValue() >= Constants.S8BIT_MIN;
         short value = (short) (values[i].getIntValue() & 0xFF);
         if (i + 1 < size) {
           value |= (short) ((values[i + 1].getIntValue() & 0xFF) << 8);
@@ -1089,9 +1231,12 @@ public class CodeRewriter {
       if (block.isMarked()) {
         continue;
       }
-      JumpInstruction exit = block.exit();
-      if (exit.isIf()) {
-        If theIf = exit.asIf();
+      if (block.exit().isIf()) {
+        // First rewrite zero comparison.
+        rewriteIfWithConstZero(block);
+
+        // Simplify if conditions when possible.
+        If theIf = block.exit().asIf();
         List<Value> inValues = theIf.inValues();
         int cond;
         if (inValues.get(0).isConstant()
@@ -1137,9 +1282,7 @@ public class CodeRewriter {
           }
         }
         assert theIf == block.exit();
-        InstructionListIterator iterator = block.listIterator(block.getInstructions().size());
-        iterator.previous();
-        iterator.replaceCurrentInstruction(new Goto());
+        replaceLastInstruction(block, new Goto());
         assert block.exit().isGoto();
         assert block.exit().asGoto().getTarget() == target;
       }
@@ -1148,40 +1291,59 @@ public class CodeRewriter {
     assert code.isConsistentSSA();
   }
 
-  public void removeUnneededCatchHandlers(IRCode code) {
-    DominatorTree dominator = new DominatorTree(code);
-    code.clearMarks();
-    for (BasicBlock block : code.blocks) {
-      if (block.hasCatchHandlers() && !block.canThrow()) {
-        CatchHandlers<BasicBlock> handlers = block.getCatchHandlers();
-        for (BasicBlock target : handlers.getUniqueTargets()) {
-          for (BasicBlock unlinked : block.unlink(target, dominator)) {
-            if (!unlinked.isMarked()) {
-              unlinked.mark();
-            }
-          }
+  private void rewriteIfWithConstZero(BasicBlock block) {
+    If theIf = block.exit().asIf();
+    if (theIf.isZeroTest()) {
+      return;
+    }
+
+    List<Value> inValues = theIf.inValues();
+    Value leftValue = inValues.get(0);
+    Value rightValue = inValues.get(1);
+    if (leftValue.isConstant() || rightValue.isConstant()) {
+      if (leftValue.isConstant()) {
+        int left = leftValue.getConstInstruction().asConstNumber().getIntValue();
+        if (left == 0) {
+          If ifz = new If(theIf.getType().forSwappedOperands(), rightValue);
+          replaceLastInstruction(block, ifz);
+          assert block.exit() == ifz;
+        }
+      } else {
+        assert rightValue.isConstant();
+        int right = rightValue.getConstInstruction().asConstNumber().getIntValue();
+        if (right == 0) {
+          If ifz = new If(theIf.getType(), leftValue);
+          replaceLastInstruction(block, ifz);
+          assert block.exit() == ifz;
         }
       }
     }
-    code.removeMarkedBlocks();
-    assert code.isConsistentSSA();
   }
 
-  public void rewriteLongCompareAndRequireNonNull(IRCode code, boolean canUseObjectsNonNull) {
-    InstructionIterator iterator = code.instructionIterator();
+  private void replaceLastInstruction(BasicBlock block, Instruction instruction) {
+    InstructionListIterator iterator = block.listIterator(block.getInstructions().size());
+    iterator.previous();
+    iterator.replaceCurrentInstruction(instruction);
+  }
 
+  public void rewriteLongCompareAndRequireNonNull(IRCode code, InternalOptions options) {
+    if (options.canUseLongCompareAndObjectsNonNull()) {
+      return;
+    }
+
+    InstructionIterator iterator = code.instructionIterator();
     while (iterator.hasNext()) {
       Instruction current = iterator.next();
       if (current.isInvokeMethod()) {
         DexMethod invokedMethod = current.asInvokeMethod().getInvokedMethod();
         if (invokedMethod == dexItemFactory.longMethods.compare) {
+          // Rewrite calls to Long.compare for sdk versions that do not have that method.
           List<Value> inValues = current.inValues();
           assert inValues.size() == 2;
           iterator.replaceCurrentInstruction(
               new Cmp(NumericType.LONG, Bias.NONE, current.outValue(), inValues.get(0),
                   inValues.get(1)));
-        } else if (!canUseObjectsNonNull
-            && invokedMethod == dexItemFactory.objectsMethods.requireNonNull) {
+        } else if (invokedMethod == dexItemFactory.objectsMethods.requireNonNull) {
           // Rewrite calls to Objects.requireNonNull(Object) because Javac 9 start to use it for
           // synthesized null checks.
           InvokeVirtual callToGetClass = new InvokeVirtual(dexItemFactory.objectMethods.getClass,
@@ -1203,7 +1365,6 @@ public class CodeRewriter {
   // Note that addSuppressed() and getSuppressed() methods are final in
   // Throwable, so these changes don't have to worry about overrides.
   public void rewriteThrowableAddAndGetSuppressed(IRCode code) {
-    boolean removeUnneededCatchHandlers = false;
     DexItemFactory.ThrowableMethods throwableMethods = dexItemFactory.throwableMethods;
 
     for (BasicBlock block : code.blocks) {
@@ -1216,47 +1377,33 @@ public class CodeRewriter {
           if (matchesMethodOfThrowable(invokedMethod, throwableMethods.addSuppressed)) {
             // Remove Throwable::addSuppressed(Throwable) call.
             iterator.remove();
-            removeUnneededCatchHandlers = true;
-
           } else if (matchesMethodOfThrowable(invokedMethod, throwableMethods.getSuppressed)) {
             Value destValue = current.outValue();
             if (destValue == null) {
               // If the result of the call was not used we don't create
               // an empty array and just remove the call.
               iterator.remove();
-              removeUnneededCatchHandlers = true;
               continue;
             }
 
             // Replace call to Throwable::getSuppressed() with new Throwable[0].
 
             // First insert the constant value *before* the current instruction.
-            Value zero = code.createValue(MoveType.SINGLE);
+            ConstNumber zero = code.createIntConstant(0);
             assert iterator.hasPrevious();
             iterator.previous();
-            iterator.add(new ConstNumber(ConstType.INT, zero, 0));
+            iterator.add(zero);
 
             // Then replace the invoke instruction with NewArrayEmpty instruction.
             Instruction next = iterator.next();
             assert current == next;
-            NewArrayEmpty newArray = new NewArrayEmpty(destValue, zero,
+            NewArrayEmpty newArray = new NewArrayEmpty(destValue, zero.outValue(),
                 dexItemFactory.createType(dexItemFactory.throwableArrayDescriptor));
             iterator.replaceCurrentInstruction(newArray);
-
-            // NOTE: nothing needs to be changed in catch handlers since we replace
-            //       one throwable instruction with another.
           }
         }
       }
     }
-
-    // If at least one addSuppressed(...) call was removed, or we were able
-    // to remove getSuppressed() call without replacing it with a new empty array,
-    // we need to deal with possible unreachable catch handlers.
-    if (removeUnneededCatchHandlers) {
-      removeUnneededCatchHandlers(code);
-    }
-
     assert code.isConsistentSSA();
   }
 

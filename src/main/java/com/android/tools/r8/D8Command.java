@@ -101,8 +101,10 @@ public class D8Command extends BaseCommand {
       if (isPrintHelp() || isPrintVersion()) {
         return new D8Command(isPrintHelp(), isPrintVersion());
       }
-      return new D8Command(getAppBuilder().build(),
-          getOutputPath(), getOutputMode(), getMode(), getMinApiLevel());
+
+      validate();
+      return new D8Command(
+          getAppBuilder().build(), getOutputPath(), getOutputMode(), getMode(), getMinApiLevel());
     }
   }
 
@@ -110,16 +112,16 @@ public class D8Command extends BaseCommand {
       "Usage: d8 [options] <input-files>",
       " where <input-files> are any combination of dex, class, zip, jar, or apk files",
       " and options are:",
-      "  --debug             # compile with debugging information (default enabled).",
-      "  --release           # compile without debugging information.",
-      "  --output <file>     # output result in <outfile>.",
-      "                      # <file> must be an existing directory or non-existent zip file.",
+      "  --debug             # Compile with debugging information (default).",
+      "  --release           # Compile without debugging information.",
+      "  --output <file>     # Output result in <outfile>.",
+      "                      # <file> must be an existing directory or a zip file.",
       "  --lib <file>        # Add <file> as a library resource.",
       "  --classpath <file>  # Add <file> as a classpath resource.",
-      "  --min-sdk-version   # minimum Android API level compatibility",
-      "  --file-per-class    # produce a separate dex file per class",
-      "  --version           # print the version of d8.",
-      "  --help              # print this message."));
+      "  --min-api           # Minimum Android API level compatibility",
+      "  --file-per-class    # Produce a separate dex file per class",
+      "  --version           # Print the version of d8.",
+      "  --help              # Print this message."));
 
   public static Builder builder() {
     return new Builder();
@@ -167,7 +169,7 @@ public class D8Command extends BaseCommand {
         builder.addLibraryFiles(Paths.get(args[++i]));
       } else if (arg.equals("--classpath")) {
         builder.addClasspathFiles(Paths.get(args[++i]));
-      } else if (arg.equals("--min-sdk-version")) {
+      } else if (arg.equals("--min-api")) {
         builder.setMinApiLevel(Integer.valueOf(args[++i]));
       } else {
         if (arg.startsWith("--")) {
@@ -179,8 +181,12 @@ public class D8Command extends BaseCommand {
     return builder.setOutputPath(outputPath);
   }
 
-  private D8Command(AndroidApp inputApp, Path outputPath,
-      OutputMode outputMode, CompilationMode mode, int minApiLevel) {
+  private D8Command(
+      AndroidApp inputApp,
+      Path outputPath,
+      OutputMode outputMode,
+      CompilationMode mode,
+      int minApiLevel) {
     super(inputApp, outputPath, outputMode, mode, minApiLevel);
   }
 
@@ -194,7 +200,6 @@ public class D8Command extends BaseCommand {
     assert !internal.debug;
     internal.debug = getMode() == CompilationMode.DEBUG;
     internal.minApiLevel = getMinApiLevel();
-    internal.fillDexFiles = true;
     // Assert and fixup defaults.
     assert !internal.skipMinification;
     internal.skipMinification = true;

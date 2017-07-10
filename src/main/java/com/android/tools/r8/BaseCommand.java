@@ -34,8 +34,12 @@ abstract class BaseCommand {
     this.minApiLevel = 0;
   }
 
-  BaseCommand(AndroidApp app, Path outputPath,
-      OutputMode outputMode, CompilationMode mode, int minApiLevel) {
+  BaseCommand(
+      AndroidApp app,
+      Path outputPath,
+      OutputMode outputMode,
+      CompilationMode mode,
+      int minApiLevel) {
     assert app != null;
     assert mode != null;
     assert minApiLevel > 0;
@@ -197,9 +201,9 @@ abstract class BaseCommand {
       return outputMode;
     }
 
-    /** Set an output path. Must be an existing directory or a non-existent zip file. */
-    public B setOutputPath(Path outputPath) throws CompilationException {
-      this.outputPath = FileUtils.validateOutputFile(outputPath);
+    /** Set an output path. Must be an existing directory or a zip file. */
+    public B setOutputPath(Path outputPath) {
+      this.outputPath = outputPath;
       return self();
     }
 
@@ -247,6 +251,10 @@ abstract class BaseCommand {
     public B setPrintVersion(boolean printVersion) {
       this.printVersion = printVersion;
       return self();
+    }
+
+    protected void validate() throws CompilationException {
+      FileUtils.validateOutputFile(outputPath);
     }
   }
 }

@@ -174,7 +174,7 @@ public class DexApplication {
         ps.println("Bytecode for");
         ps.println("Class: '" + clazzName + "'");
         ps.println("Method: '" + methodName + "':");
-        ps.println(method.getCode().toString(naming));
+        ps.println(method.getCode().toString(method, naming));
       } catch (IOException e) {
         e.printStackTrace();
       } finally {
@@ -305,8 +305,6 @@ public class DexApplication {
     private final List<DexProgramClass> programClasses;
     private ClasspathClassCollection classpathClasses;
     private LibraryClassCollection libraryClasses;
-
-    public final Hashtable<DexCode, DexCode> codeItems = new Hashtable<>();
 
     public final DexItemFactory dexItemFactory;
     public ClassNameMapper proguardMap;
