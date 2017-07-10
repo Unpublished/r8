@@ -107,6 +107,7 @@ public class PeepholeOptimizer {
       Instruction instruction = from.previous();
       movedThrowingInstruction = movedThrowingInstruction || instruction.instructionTypeCanThrow();
       newBlock.getInstructions().addFirst(instruction);
+      instruction.setBlock(newBlock);
     }
     if (movedThrowingInstruction && first.hasCatchHandlers()) {
       newBlock.transferCatchHandlers(first);
@@ -215,7 +216,7 @@ public class PeepholeOptimizer {
         } else if (current.outValue() != null && current.outValue().needsRegister()) {
           Value outValue = current.outValue();
           int instructionNumber = current.getNumber();
-          if (current.isConstNumber()) {
+          if (outValue.isConstant() && current.isConstNumber()) {
             if (constantSpilledAtDefinition(current.asConstNumber(), allocator)) {
               // Remove constant instructions that are spilled at their definition and are
               // therefore unused.

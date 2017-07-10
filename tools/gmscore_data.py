@@ -21,6 +21,10 @@ V9_PREFIX = os.path.join(V9_BASE, 'GmsCore_prod_alldpi_release_all_locales')
 V10_BASE = os.path.join(BASE, 'gmscore_v10')
 V10_PREFIX = os.path.join(V10_BASE, 'GmsCore_prod_alldpi_release_all_locales')
 
+LATEST_BASE = os.path.join(BASE, 'latest')
+LATEST_PREFIX = os.path.join(LATEST_BASE, 'GmsCore_prod_alldpi_release_all_locales')
+ANDROID_L_API = '21'
+
 # NOTE: we always use android.jar for SDK v25, later we might want to revise it
 #       to use proper android.jar version for each of gmscore version separately.
 ANDROID_JAR = os.path.join(THIRD_PARTY, 'android_jar', 'lib-v25', 'android.jar')
@@ -32,6 +36,7 @@ VERSIONS = {
       'pgmap' : os.path.join(V4_BASE, 'proguard.map'),
       'libraries' : [ANDROID_JAR],
       'r8-flags': '--ignore-missing-classes',
+      'min-api' : ANDROID_L_API,
     }
   },
   'v5': {
@@ -40,6 +45,7 @@ VERSIONS = {
       'pgmap' : os.path.join(V5_BASE, 'proguard.map'),
       'libraries' : [ANDROID_JAR],
       'r8-flags': '--ignore-missing-classes',
+      'min-api' : ANDROID_L_API,
     }
   },
   'v6': {
@@ -48,6 +54,7 @@ VERSIONS = {
       'pgmap' : os.path.join(V6_BASE, 'proguard.map'),
       'libraries' : [ANDROID_JAR],
       'r8-flags': '--ignore-missing-classes',
+      'min-api' : ANDROID_L_API,
     }
   },
   'v7': {
@@ -56,6 +63,7 @@ VERSIONS = {
       'pgmap' : os.path.join(V7_BASE, 'proguard.map'),
       'libraries' : [ANDROID_JAR],
       'r8-flags': '--ignore-missing-classes',
+      'min-api' : ANDROID_L_API,
     }
   },
   'v8': {
@@ -64,6 +72,7 @@ VERSIONS = {
       'pgmap' : os.path.join(V8_BASE, 'proguard.map'),
       'libraries' : [ANDROID_JAR],
       'r8-flags': '--ignore-missing-classes',
+      'min-api' : ANDROID_L_API,
     }
   },
   'v9': {
@@ -72,15 +81,18 @@ VERSIONS = {
       'pgmap': '%s_proguard.map' % V9_PREFIX,
       'libraries' : [ANDROID_JAR],
       'r8-flags': '--ignore-missing-classes',
+      'min-api' : ANDROID_L_API,
     },
     'deploy' : {
       'pgconf': ['%s_proguard.config' % V9_PREFIX],
-      'inputs': ['%s_deploy.jar' % V9_PREFIX]
+      'inputs': ['%s_deploy.jar' % V9_PREFIX],
+      'min-api' : ANDROID_L_API,
     },
     'proguarded' : {
       'inputs': ['%s_proguard.jar' % V9_PREFIX],
-      'pgmap': '%s_proguard.map' % V9_PREFIX
-    }
+      'pgmap': '%s_proguard.map' % V9_PREFIX,
+      'min-api' : ANDROID_L_API,
+     }
   },
   'v10': {
     'dex' : {
@@ -88,14 +100,26 @@ VERSIONS = {
       'pgmap': '%s_proguard.map' % V10_PREFIX,
       'libraries' : [ANDROID_JAR],
       'r8-flags': '--ignore-missing-classes',
+      'min-api' : ANDROID_L_API,
     },
     'deploy' : {
       'inputs': ['%s_deploy.jar' % V10_PREFIX],
       'pgconf': ['%s_proguard.config' % V10_PREFIX],
+      'min-api' : ANDROID_L_API,
     },
     'proguarded' : {
       'inputs': ['%s_proguard.jar' % V10_PREFIX],
-      'pgmap': '%s_proguard.map' % V10_PREFIX
+      'pgmap': '%s_proguard.map' % V10_PREFIX,
+      'min-api' : ANDROID_L_API,
     }
+  },
+  'latest': {
+    'deploy' : {
+      'inputs': ['%s_deploy.jar' % LATEST_PREFIX],
+      'pgconf': [
+          '%s_proguard.config' % LATEST_PREFIX,
+          '%s/proguardsettings/GmsCore_proguard.config' % THIRD_PARTY],
+      'min-api' : ANDROID_L_API,
+    },
   },
 }

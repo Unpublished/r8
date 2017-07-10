@@ -4,8 +4,6 @@
 
 package com.android.tools.r8.ir.conversion;
 
-import com.android.tools.r8.code.PackedSwitchPayload;
-import com.android.tools.r8.code.SparseSwitchPayload;
 import com.android.tools.r8.dex.Constants;
 import com.android.tools.r8.errors.CompilationError;
 import com.android.tools.r8.errors.InternalCompilerError;
@@ -36,7 +34,6 @@ import com.android.tools.r8.ir.code.ConstClass;
 import com.android.tools.r8.ir.code.ConstNumber;
 import com.android.tools.r8.ir.code.ConstString;
 import com.android.tools.r8.ir.code.ConstType;
-import com.android.tools.r8.ir.code.DebugLocalRead;
 import com.android.tools.r8.ir.code.DebugLocalUninitialized;
 import com.android.tools.r8.ir.code.DebugLocalWrite;
 import com.android.tools.r8.ir.code.DebugPosition;
@@ -84,8 +81,10 @@ import com.android.tools.r8.utils.InternalOptions;
 import it.unimi.dsi.fastutil.ints.Int2ReferenceAVLTreeMap;
 import it.unimi.dsi.fastutil.ints.Int2ReferenceMap;
 import it.unimi.dsi.fastutil.ints.Int2ReferenceSortedMap;
+import it.unimi.dsi.fastutil.ints.IntArrayList;
 import it.unimi.dsi.fastutil.ints.IntArraySet;
 import it.unimi.dsi.fastutil.ints.IntIterator;
+import it.unimi.dsi.fastutil.ints.IntList;
 import it.unimi.dsi.fastutil.ints.IntSet;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -265,6 +264,11 @@ public class IRBuilder {
   boolean throwingInstructionInCurrentBlock = false;
 
   private final InternalOptions options;
+
+  // Pending local changes.
+  private List<Value> debugLocalStarts = new ArrayList<>();
+  private List<Value> debugLocalReads = new ArrayList<>();
+  private List<Value> debugLocalEnds = new ArrayList<>();
 
   public IRBuilder(DexEncodedMethod method, SourceCode source, InternalOptions options) {
     this(method, source, new ValueNumberGenerator(), options);
@@ -461,9 +465,8 @@ public class IRBuilder {
   }
 
   // Helper to resolve switch payloads and build switch instructions (dex code only).
-  public void resolveAndBuildSwitch(Switch.Type type, int value, int fallthroughOffset,
-      int payloadOffset) {
-    source.resolveAndBuildSwitch(type, value, fallthroughOffset, payloadOffset, this);
+  public void resolveAndBuildSwitch(int value, int fallthroughOffset, int payloadOffset) {
+    source.resolveAndBuildSwitch(value, fallthroughOffset, payloadOffset, this);
   }
 
   // Helper to resolve fill-array data and build new-array instructions (dex code only).
@@ -518,20 +521,10 @@ public class IRBuilder {
       // We cannot shortcut if the local is defined by a phi as it could end up being trivial.
       addDebugLocalWrite(moveType, register, in);
     } else {
-      DebugLocalRead read = addDebugLocalRead(register, local);
-      if (read != null) {
-        read.addDebugLocalStart();
+      Value value = getLocalValue(register, local);
+      if (value != null) {
+        debugLocalStarts.add(value);
       }
-    }
-  }
-
-  public void addDebugLocalEnd(int register, DebugLocalInfo local) {
-    if (!options.debug) {
-      return;
-    }
-    DebugLocalRead read = addDebugLocalRead(register, local);
-    if (read != null) {
-      read.addDebugLocalEnd();
     }
   }
 
@@ -542,10 +535,7 @@ public class IRBuilder {
     addInstruction(write);
   }
 
-  public DebugLocalRead addDebugLocalRead(int register, DebugLocalInfo local) {
-    if (!options.debug) {
-      return null;
-    }
+  private Value getLocalValue(int register, DebugLocalInfo local) {
     assert local != null;
     assert local == getCurrentLocal(register);
     MoveType moveType = MoveType.fromDexType(local.type);
@@ -556,10 +546,27 @@ public class IRBuilder {
       return null;
     }
     assert in.getLocalInfo() == local;
-    DebugLocalRead readLocal = new DebugLocalRead(in);
-    assert !readLocal.instructionTypeCanThrow();
-    addInstruction(readLocal);
-    return readLocal;
+    return in;
+  }
+
+  public void addDebugLocalRead(int register, DebugLocalInfo local) {
+    if (!options.debug) {
+      return;
+    }
+    Value value = getLocalValue(register, local);
+    if (value != null) {
+      debugLocalReads.add(value);
+    }
+  }
+
+  public void addDebugLocalEnd(int register, DebugLocalInfo local) {
+    if (!options.debug) {
+      return;
+    }
+    Value value = getLocalValue(register, local);
+    if (value != null) {
+      debugLocalEnds.add(value);
+    }
   }
 
   public void addAdd(NumericType type, int dest, int left, int right) {
@@ -905,7 +912,7 @@ public class IRBuilder {
     if (type == Invoke.Type.POLYMORPHIC && !options.canUseInvokePolymorphic()) {
       throw new CompilationError(
           "MethodHandle.invoke and MethodHandle.invokeExact is unsupported before "
-              + "Android O (--min-sdk-version " + Constants.ANDROID_O_API + ")");
+              + "Android O (--min-api " + Constants.ANDROID_O_API + ")");
     }
     add(Invoke.create(type, item, callSiteProto, null, arguments));
   }
@@ -1204,10 +1211,9 @@ public class IRBuilder {
     }
   }
 
-  public void addSwitch(Switch.Type type, int value, int[] keys, int fallthroughOffset,
-      int[] labelOffsets) {
+  public void addSwitch(int value, int[] keys, int fallthroughOffset, int[] labelOffsets) {
     int numberOfTargets = labelOffsets.length;
-    assert (type == Switch.Type.PACKED && keys.length == 1) || (keys.length == numberOfTargets);
+    assert (keys.length == 1) || (keys.length == numberOfTargets);
 
     // If the switch has no targets simply add a goto to the fallthrough.
     if (numberOfTargets == 0) {
@@ -1217,73 +1223,51 @@ public class IRBuilder {
 
     Value switchValue = readRegister(value, MoveType.SINGLE);
 
-    // Change a switch with just one case to an if.
-    // TODO(62247472): Move these into their own pass.
-    if (numberOfTargets == 1) {
-      addSwitchIf(keys[0], value, labelOffsets[0], fallthroughOffset);
-      return;
-    }
-
-    // javac generates sparse switch (lookupwitch bytecode) for all two-case switch. Change
-    // to packed switch for consecutive keys.
-    if (numberOfTargets == 2 && type == Switch.Type.SPARSE && keys[0] + 1 == keys[1]) {
-      addInstruction(createSwitch(
-          Switch.Type.PACKED, switchValue, new int[]{keys[0]}, fallthroughOffset, labelOffsets));
-      closeCurrentBlock();
-      return;
-    }
-
-    // javac generates packed switches pretty aggressively. We convert to sparse switches
-    // if the dex sparse switch payload takes up less space than the packed payload.
-    if (type == Switch.Type.PACKED) {
-      int numberOfFallthroughs = 0;
+    // Find the keys not targeting the fallthrough.
+    IntList nonFallthroughKeys = new IntArrayList(numberOfTargets);
+    IntList nonFallthroughOffsets = new IntArrayList(numberOfTargets);
+    int numberOfFallthroughs = 0;
+    if (keys.length == 1) {
+      int key = keys[0];
       for (int i = 0; i < numberOfTargets; i++) {
-        if (labelOffsets[i] == fallthroughOffset) {
-          ++numberOfFallthroughs;
+        if (labelOffsets[i] != fallthroughOffset) {
+          nonFallthroughKeys.add(key);
+          nonFallthroughOffsets.add(labelOffsets[i]);
+        } else {
+          numberOfFallthroughs++;
         }
+        key++;
       }
-      // If this was a packed switch with only fallthrough cases we can make it a goto.
-      // Oddly, this does happen.
-      if (numberOfFallthroughs == numberOfTargets) {
-        BlockInfo info = targets.get(fallthroughOffset);
-        info.block.decrementUnfilledPredecessorCount(numberOfFallthroughs);
-        addGoto(fallthroughOffset);
-        return;
-      }
-      int numberOfSparseTargets = numberOfTargets - numberOfFallthroughs;
-      int sparseSwitchPayloadSize = SparseSwitchPayload.getSizeForTargets(numberOfSparseTargets);
-      int packedSwitchPayloadSize = PackedSwitchPayload.getSizeForTargets(numberOfTargets);
-      int bytesSaved = packedSwitchPayloadSize - sparseSwitchPayloadSize;
-      // Perform the rewrite if we can reduce the payload size by more than 20%.
-      if (bytesSaved > (packedSwitchPayloadSize / 5)) {
-        BlockInfo info = targets.get(fallthroughOffset);
-        info.block.decrementUnfilledPredecessorCount(numberOfFallthroughs);
-        int nextCaseIndex = 0;
-        int currentKey = keys[0];
-        keys = new int[numberOfSparseTargets];
-        int[] newLabelOffsets = new int[numberOfSparseTargets];
-        for (int i = 0; i < numberOfTargets; i++) {
-          if (labelOffsets[i] != fallthroughOffset) {
-            keys[nextCaseIndex] = currentKey;
-            newLabelOffsets[nextCaseIndex] = labelOffsets[i];
-            ++nextCaseIndex;
-          }
-          ++currentKey;
+    } else {
+      assert keys.length == numberOfTargets;
+      for (int i = 0; i < numberOfTargets; i++) {
+        if (labelOffsets[i] != fallthroughOffset) {
+          nonFallthroughKeys.add(keys[i]);
+          nonFallthroughOffsets.add(labelOffsets[i]);
+        } else {
+          numberOfFallthroughs++;
         }
-        addInstruction(createSwitch(
-            Switch.Type.SPARSE, switchValue, keys, fallthroughOffset, newLabelOffsets));
-        closeCurrentBlock();
-        return;
       }
     }
+    targets.get(fallthroughOffset).block.decrementUnfilledPredecessorCount(numberOfFallthroughs);
 
-    addInstruction(createSwitch(type, switchValue, keys, fallthroughOffset, labelOffsets));
+    // If this was switch with only fallthrough cases we can make it a goto.
+    // Oddly, this does happen.
+    if (numberOfFallthroughs == numberOfTargets) {
+      assert nonFallthroughKeys.size() == 0;
+      addGoto(fallthroughOffset);
+      return;
+    }
+
+    // Create a switch with only the non-fallthrough targets.
+    keys = nonFallthroughKeys.toIntArray();
+    labelOffsets = nonFallthroughOffsets.toIntArray();
+    addInstruction(createSwitch(switchValue, keys, fallthroughOffset, labelOffsets));
     closeCurrentBlock();
   }
 
-  private Switch createSwitch(Switch.Type type, Value value, int[] keys, int fallthroughOffset,
-      int[] targetOffsets) {
-    assert keys.length > 0;
+  private Switch createSwitch(Value value, int[] keys, int fallthroughOffset, int[] targetOffsets) {
+    assert keys.length == targetOffsets.length;
     // Compute target blocks for all keys. Only add a successor block once even
     // if it is hit by more of the keys.
     int[] targetBlockIndices = new int[targetOffsets.length];
@@ -1313,7 +1297,7 @@ public class IRBuilder {
         targetBlockIndices[i] = targetBlockIndex;
       }
     }
-    return new Switch(type, value, keys, targetBlockIndices, fallthroughBlockIndex);
+    return new Switch(value, keys, targetBlockIndices, fallthroughBlockIndex);
   }
 
   public void addThrow(int value) {
@@ -1573,6 +1557,7 @@ public class IRBuilder {
 
   // Private instruction helpers.
   private void addInstruction(Instruction ir) {
+    attachLocalChanges(ir);
     if (currentDebugPosition != null && !ir.isMoveException()) {
       flushCurrentDebugPosition();
     }
@@ -1596,6 +1581,29 @@ public class IRBuilder {
       assert ir.isMoveException();
       flushCurrentDebugPosition();
     }
+  }
+
+  private void attachLocalChanges(Instruction ir) {
+    if (!options.debug) {
+      return;
+    }
+    if (debugLocalStarts.isEmpty() && debugLocalReads.isEmpty() && debugLocalEnds.isEmpty()) {
+      return;
+    }
+    for (Value debugLocalStart : debugLocalStarts) {
+      ir.addDebugValue(debugLocalStart);
+      debugLocalStart.addDebugLocalStart(ir);
+    }
+    for (Value debugLocalRead : debugLocalReads) {
+      ir.addDebugValue(debugLocalRead);
+    }
+    for (Value debugLocalEnd : debugLocalEnds) {
+      ir.addDebugValue(debugLocalEnd);
+      debugLocalEnd.addDebugLocalEnd(ir);
+    }
+    debugLocalStarts.clear();
+    debugLocalReads.clear();
+    debugLocalEnds.clear();
   }
 
   // Package (ie, SourceCode accessed) helpers.
@@ -1704,8 +1712,7 @@ public class IRBuilder {
 
   private void closeCurrentBlockWithFallThrough(BasicBlock nextBlock) {
     assert currentBlock != null;
-    flushCurrentDebugPosition();
-    currentBlock.add(new Goto());
+    addInstruction(new Goto());
     if (currentBlock.hasCatchSuccessor(nextBlock)) {
       needGotoToCatchBlocks.add(new BasicBlock.Pair(currentBlock, nextBlock));
     } else {
@@ -1755,6 +1762,12 @@ public class IRBuilder {
         }
         Goto gotoExit = new Goto();
         gotoExit.setBlock(block);
+        if (options.debug) {
+          for (Value value : ret.getDebugValues()) {
+            gotoExit.addDebugValue(value);
+            value.removeDebugUser(ret);
+          }
+        }
         instructions.set(instructions.size() - 1, gotoExit);
         block.link(normalExitBlock);
         gotoExit.setTarget(normalExitBlock);
@@ -1958,6 +1971,7 @@ public class IRBuilder {
     // Stack-trace support requires position information in both debug and release mode.
     flushCurrentDebugPosition();
     currentDebugPosition = new DebugPosition(line, file);
+    attachLocalChanges(currentDebugPosition);
   }
 
   private void flushCurrentDebugPosition() {

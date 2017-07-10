@@ -87,6 +87,15 @@ public class TestBase {
   /**
    * Compile an application with R8.
    */
+  protected AndroidApp compileWithR8(Class... classes)
+      throws CompilationException, ProguardRuleParserException, ExecutionException, IOException {
+    R8Command command = ToolHelper.prepareR8CommandBuilder(readClasses(classes)).build();
+    return ToolHelper.runR8(command);
+  }
+
+  /**
+   * Compile an application with R8.
+   */
   protected AndroidApp compileWithR8(List<Class> classes)
       throws CompilationException, ProguardRuleParserException, ExecutionException, IOException {
     R8Command command = ToolHelper.prepareR8CommandBuilder(readClasses(classes)).build();
@@ -122,6 +131,15 @@ public class TestBase {
   /**
    * Compile an application with R8 using the supplied proguard configuration.
    */
+  protected AndroidApp compileWithR8(
+      List<Class> classes, String proguardConfig, Consumer<InternalOptions> optionsConsumer)
+      throws CompilationException, ProguardRuleParserException, ExecutionException, IOException {
+    return compileWithR8(readClasses(classes), proguardConfig, optionsConsumer);
+  }
+
+  /**
+   * Compile an application with R8 using the supplied proguard configuration.
+   */
   protected AndroidApp compileWithR8(List<Class> classes, Path proguardConfig)
       throws CompilationException, ProguardRuleParserException, ExecutionException, IOException {
     return compileWithR8(readClasses(classes), proguardConfig);
@@ -137,6 +155,15 @@ public class TestBase {
             .addProguardConfigurationFiles(proguardConfig)
             .build();
     return ToolHelper.runR8(command);
+  }
+
+  /**
+   * Compile an application with R8 using the supplied proguard configuration.
+   */
+  protected AndroidApp compileWithR8(
+      AndroidApp app, String proguardConfig, Consumer<InternalOptions> optionsConsumer)
+      throws CompilationException, ProguardRuleParserException, ExecutionException, IOException {
+    return compileWithR8(app, writeTextToTempFile(proguardConfig), optionsConsumer);
   }
 
   /**
@@ -179,9 +206,25 @@ public class TestBase {
    */
   protected String runOnArt(AndroidApp app, Class mainClass) throws IOException {
     Path out = File.createTempFile("junit", ".zip", temp.getRoot()).toPath();
-    app.writeToZip(out, OutputMode.Indexed, true);
+    app.writeToZip(out, OutputMode.Indexed);
     return ToolHelper.runArtNoVerificationErrors(
         ImmutableList.of(out.toString()), mainClass.getCanonicalName(), null);
+  }
+
+  /**
+   * Run application on Art with the specified main class and provided arguments.
+   */
+  protected String runOnArt(AndroidApp app, Class mainClass, String... args) throws IOException {
+    Path out = File.createTempFile("junit", ".zip", temp.getRoot()).toPath();
+    app.writeToZip(out, OutputMode.Indexed);
+    return ToolHelper.runArtNoVerificationErrors(
+        ImmutableList.of(out.toString()), mainClass.getCanonicalName(),
+        builder -> {
+          builder.appendArtOption("-ea");
+          for (String arg : args) {
+            builder.appendProgramArgument(arg);
+          }
+        });
   }
 
   /**

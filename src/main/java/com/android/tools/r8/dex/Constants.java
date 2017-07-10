@@ -10,6 +10,7 @@ public class Constants {
 
   public static final int ANDROID_O_API = 26;
   public static final int ANDROID_N_API = 24;
+  public static final int ANDROID_L_API = 21;
   public static final int ANDROID_K_API = 19;
   public static final int DEFAULT_ANDROID_API = 1;
 
@@ -112,6 +113,7 @@ public class Constants {
   public static final int U4BIT_MAX = (1 << 4) - 1;
   public static final int U8BIT_MAX = (1 << 8) - 1;
   public static final int U16BIT_MAX = (1 << 16) - 1;
+  public static final long U32BIT_MAX = (1L << 32) - 1;
   public static final int ACC_PUBLIC = 0x1;
   public static final int ACC_PRIVATE = 0x2;
   public static final int ACC_PROTECTED = 0x4;

@@ -198,7 +198,7 @@ public class R8 {
       if (options.minApiLevel >= Constants.ANDROID_O_API
           && !options.mainDexKeepRules.isEmpty()) {
         throw new CompilationError("Automatic main dex list is not supported when compiling for"
-            + " android O and later (--min-sdk-version " + Constants.ANDROID_O_API + ")");
+            + " android O and later (--min-api " + Constants.ANDROID_O_API + ")");
       }
       DexApplication application =
           new ApplicationReader(inputApp, options, timing).read(executorService);
@@ -207,7 +207,6 @@ public class R8 {
       RootSet rootSet;
       byte[] proguardSeedsData = null;
       timing.begin("Strip unused code");
-      Set<DexType> mainDexBaseClasses = null;
       try {
         Set<DexType> missingClasses = appInfo.getMissingClasses();
         missingClasses = filterMissingClasses(missingClasses, options.dontWarnPatterns);
@@ -281,7 +280,7 @@ public class R8 {
         // Lets find classes which may have code executed before secondary dex files installation.
         RootSet mainDexRootSet =
             new RootSetBuilder(application, appInfo, options.mainDexKeepRules).run(executorService);
-        mainDexBaseClasses = enqueuer.traceMainDex(mainDexRootSet, timing);
+        Set<DexType> mainDexBaseClasses = enqueuer.traceMainDex(mainDexRootSet, timing);
 
         // Calculate the automatic main dex list according to legacy multidex constraints.
         // Add those classes to an eventual manual list of classes.
@@ -309,7 +308,8 @@ public class R8 {
         }
       }
 
-      if (!rootSet.checkDiscarded.isEmpty()) {
+      // Only perform discard-checking if tree-shaking is turned on.
+      if (options.useTreeShaking && !rootSet.checkDiscarded.isEmpty()) {
         new DiscardedChecker(rootSet, application).run();
       }
 
@@ -391,23 +391,24 @@ public class R8 {
     if (options.printMapping && !options.skipMinification) {
       assert outputApp.hasProguardMap();
       try (Closer closer = Closer.create()) {
-        OutputStream mapOut =
-            openPathWithDefault(closer, options.printMappingFile, true, System.out);
+        OutputStream mapOut = openPathWithDefault(
+            closer,
+            options.printMappingFile,
+            System.out);
         outputApp.writeProguardMap(closer, mapOut);
       }
     }
     if (options.printSeeds) {
       assert outputApp.hasProguardSeeds();
       try (Closer closer = Closer.create()) {
-        OutputStream seedsOut =
-            openPathWithDefault(closer, options.seedsFile, true, System.out);
+        OutputStream seedsOut = openPathWithDefault(closer, options.seedsFile, System.out);
         outputApp.writeProguardSeeds(closer, seedsOut);
       }
     }
     if (options.printMainDexList && outputApp.hasMainDexList()) {
       try (Closer closer = Closer.create()) {
         OutputStream mainDexOut =
-            openPathWithDefault(closer, options.printMainDexListFile, true, System.out);
+            openPathWithDefault(closer, options.printMainDexListFile, System.out);
         outputApp.writeMainDexList(closer, mainDexOut);
       }
     }
@@ -415,18 +416,14 @@ public class R8 {
 
   private static OutputStream openPathWithDefault(Closer closer,
       Path file,
-      boolean allowOverwrite,
       PrintStream defaultOutput) throws IOException {
     OutputStream mapOut;
     if (file == null) {
       mapOut = defaultOutput;
     } else {
-      if (!allowOverwrite) {
-        mapOut = Files.newOutputStream(file, StandardOpenOption.CREATE_NEW);
-      } else {
-        mapOut = Files.newOutputStream(file,
-            StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-      }
+      mapOut =
+          Files.newOutputStream(
+              file, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
       closer.register(mapOut);
     }
     return mapOut;

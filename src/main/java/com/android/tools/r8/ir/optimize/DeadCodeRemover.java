@@ -4,6 +4,8 @@
 package com.android.tools.r8.ir.optimize;
 
 import com.android.tools.r8.ir.code.BasicBlock;
+import com.android.tools.r8.ir.code.CatchHandlers;
+import com.android.tools.r8.ir.code.DominatorTree;
 import com.android.tools.r8.ir.code.IRCode;
 import com.android.tools.r8.ir.code.Instruction;
 import com.android.tools.r8.ir.code.InstructionListIterator;
@@ -11,6 +13,7 @@ import com.android.tools.r8.ir.code.Phi;
 import com.android.tools.r8.ir.code.Value;
 import com.android.tools.r8.utils.InternalOptions;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Queue;
@@ -20,12 +23,48 @@ public class DeadCodeRemover {
   public static void removeDeadCode(
       IRCode code, CodeRewriter codeRewriter, InternalOptions options) {
     Queue<BasicBlock> worklist = new LinkedList<>();
+    DominatorTree dominator = new DominatorTree(code);
+    code.clearMarks();
     worklist.addAll(code.blocks);
     for (BasicBlock block = worklist.poll(); block != null; block = worklist.poll()) {
-      removeDeadInstructions(worklist, block, options);
+      if (block.isMarked()) {
+        // Ignore marked blocks, as they are scheduled for removal.
+        continue;
+      }
+      removeDeadInstructions(worklist, code, block, options);
       removeDeadPhis(worklist, block, options);
+      removeUnneededCatchHandlers(worklist, block, dominator);
     }
+    code.removeMarkedBlocks();
+    assert code.isConsistentSSA();
     codeRewriter.rewriteMoveResult(code);
+  }
+
+  // Add the block from where the value originates to the worklist.
+  private static void updateWorklist(Queue<BasicBlock> worklist, Value value) {
+    BasicBlock block;
+    if (value.isPhi()) {
+      block = value.asPhi().getBlock();
+    } else {
+      block = value.definition.getBlock();
+    }
+    if (!block.isMarked()) {
+      worklist.add(block);
+    }
+  }
+
+  // Add all blocks from where the in/debug-values to the instruction originates.
+  private static void updateWorklist(Queue<BasicBlock> worklist, Instruction instruction) {
+    for (Value inValue : instruction.inValues()) {
+      updateWorklist(worklist, inValue);
+    }
+    for (Value debugValue : instruction.getDebugValues()) {
+      updateWorklist(worklist, debugValue);
+    }
+    Value previousLocalValue = instruction.getPreviousLocalValue();
+    if (previousLocalValue != null) {
+      updateWorklist(worklist, previousLocalValue);
+    }
   }
 
   private static void removeDeadPhis(
@@ -36,11 +75,7 @@ public class DeadCodeRemover {
         toRemove.add(phi);
         for (Value operand : phi.getOperands()) {
           operand.removePhiUser(phi);
-          if (operand.isPhi()) {
-            worklist.add(operand.asPhi().getBlock());
-          } else {
-            worklist.add(operand.definition.getBlock());
-          }
+          updateWorklist(worklist, operand);
         }
       }
     }
@@ -63,7 +98,7 @@ public class DeadCodeRemover {
   }
 
   private static void removeDeadInstructions(
-      Queue<BasicBlock> worklist, BasicBlock block, InternalOptions options) {
+      Queue<BasicBlock> worklist, IRCode code, BasicBlock block, InternalOptions options) {
     InstructionListIterator iterator = block.listIterator(block.getInstructions().size());
     while (iterator.hasPrevious()) {
       Instruction current = iterator.previous();
@@ -73,8 +108,8 @@ public class DeadCodeRemover {
           && current.outValue().numberOfAllUsers() == 0) {
         current.setOutValue(null);
       }
-      // Never remove instructions that can have side effects.
-      if (!current.canBeDeadCode(options)) {
+      // Never remove instructions that can have side effects, except for const-class.
+      if (!current.canBeDeadCode(code, options)) {
         continue;
       }
       Value outValue = current.outValue();
@@ -83,26 +118,31 @@ public class DeadCodeRemover {
       assert outValue != null;
       if (!outValue.isDead(options)) {
         continue;
+
       }
-      for (Value inValue : current.inValues()) {
-        if (inValue.isPhi()) {
-          worklist.add(inValue.asPhi().getBlock());
-        } else {
-          worklist.add(inValue.definition.getBlock());
-        }
-      }
-      Value previousLocalValue = current.getPreviousLocalValue();
-      if (previousLocalValue != null) {
-        if (previousLocalValue.isPhi()) {
-          worklist.add(previousLocalValue.asPhi().getBlock());
-        } else {
-          worklist.add(previousLocalValue.definition.getBlock());
-        }
-      }
+      updateWorklist(worklist, current);
       // All users will be removed for this instruction. Eagerly clear them so further inspection
       // of this instruction during dead code elimination will terminate here.
       outValue.clearUsers();
       iterator.remove();
+    }
+  }
+
+  private static void removeUnneededCatchHandlers(
+      Queue<BasicBlock> worklist, BasicBlock block, DominatorTree dominator) {
+    if (block.hasCatchHandlers() && !block.canThrow()) {
+      CatchHandlers<BasicBlock> handlers = block.getCatchHandlers();
+      for (BasicBlock target : handlers.getUniqueTargets()) {
+        for (BasicBlock unlinked : block.unlink(target, dominator)) {
+          if (!unlinked.isMarked()) {
+            Iterator<Instruction> iterator = unlinked.iterator();
+            while (iterator.hasNext()) {
+              updateWorklist(worklist, iterator.next());
+            }
+            unlinked.mark();
+          }
+        }
+      }
     }
   }
 }

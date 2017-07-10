@@ -343,7 +343,7 @@ public class SmaliTestBase {
 
     public String run() {
       AppInfo appInfo = new AppInfo(application);
-      IRConverter converter = new IRConverter(application, appInfo, options, null);
+      IRConverter converter = new IRConverter(application, appInfo, options);
       converter.replaceCodeForTesting(method, code);
       return runArt(application, options);
     }
@@ -474,7 +474,7 @@ public class SmaliTestBase {
       AndroidApp app = writeDex(application, options);
       Path out = temp.getRoot().toPath().resolve("run-art-input.zip");
       // TODO(sgjesse): Pass in a unique temp directory for each run.
-      app.writeToZip(out, OutputMode.Indexed, true);
+      app.writeToZip(out, OutputMode.Indexed);
       return ToolHelper.runArtNoVerificationErrors(out.toString(), DEFAULT_MAIN_CLASS_NAME);
     } catch (IOException e) {
       throw new RuntimeException(e);

@@ -26,6 +26,7 @@ public class R8Command extends BaseCommand {
   public static class Builder extends BaseCommand.Builder<R8Command, Builder> {
 
     private final List<Path> mainDexRules = new ArrayList<>();
+    private boolean minimalMainDex = false;
     private final List<Path> proguardConfigFiles = new ArrayList<>();
     private Optional<Boolean> treeShaking = Optional.empty();
     private Optional<Boolean> minification = Optional.empty();
@@ -77,6 +78,16 @@ public class R8Command extends BaseCommand {
     }
 
     /**
+     * Request minimal main dex generated when main dex rules are used.
+     *
+     * The main purpose of this is to verify that the main dex rules are sufficient
+     * for running on a platform without native multi dex support.
+     */
+    public Builder setMinimalMainDex(boolean value) {
+      minimalMainDex = value;
+      return this;
+    }
+    /**
      * Add proguard configuration file resources.
      */
     public Builder addProguardConfigurationFiles(Path... paths) {
@@ -125,6 +136,7 @@ public class R8Command extends BaseCommand {
         return new R8Command(isPrintHelp(), isPrintVersion());
       }
 
+      validate();
       DexItemFactory factory = new DexItemFactory();
       ImmutableList<ProguardConfigurationRule> mainDexKeepRules;
       if (this.mainDexRules.isEmpty()) {
@@ -161,6 +173,7 @@ public class R8Command extends BaseCommand {
           getOutputPath(),
           getOutputMode(),
           mainDexKeepRules,
+          minimalMainDex,
           configuration,
           getMode(),
           getMinApiLevel(),
@@ -180,12 +193,12 @@ public class R8Command extends BaseCommand {
       "Usage: r8 [options] <input-files>",
       " where <input-files> are any combination of dex, class, zip, jar, or apk files",
       " and options are:",
-      "  --debug                 # Compile with debugging information (default enabled).",
-      "  --release               # Compile without debugging information.",
+      "  --release               # Compile without debugging information (default).",
+      "  --debug                 # Compile with debugging information.",
       "  --output <file>         # Output result in <file>.",
-      "                          # <file> must be an existing directory or non-existent zip file.",
+      "                          # <file> must be an existing directory or a zip file.",
       "  --lib <file>            # Add <file> as a library resource.",
-      "  --min-sdk-version       # Minimum Android API level compatibility.",
+      "  --min-api               # Minimum Android API level compatibility.",
       "  --pg-conf <file>        # Proguard configuration <file> (implies tree shaking/minification).",
       "  --pg-map <file>         # Proguard map <file>.",
       "  --no-tree-shaking       # Force disable tree shaking of unreachable classes.",
@@ -196,6 +209,7 @@ public class R8Command extends BaseCommand {
       "  --help                  # Print this message."));
 
   private final ImmutableList<ProguardConfigurationRule> mainDexKeepRules;
+  private final boolean minimalMainDex;
   private final ProguardConfiguration proguardConfiguration;
   private final boolean useTreeShaking;
   private final boolean useMinification;
@@ -251,7 +265,7 @@ public class R8Command extends BaseCommand {
         builder.setOutputPath(Paths.get(outputPath));
       } else if (arg.equals("--lib")) {
         builder.addLibraryFiles(Paths.get(args[++i]));
-      } else if (arg.equals("--min-sdk-version")) {
+      } else if (arg.equals("--min-api")) {
         builder.setMinApiLevel(Integer.valueOf(args[++i]));
       } else if (arg.equals("--no-tree-shaking")) {
         builder.setTreeShaking(false);
@@ -259,6 +273,8 @@ public class R8Command extends BaseCommand {
         builder.setMinification(false);
       } else if (arg.equals("--multidex-rules")) {
         builder.addMainDexRules(Paths.get(args[++i]));
+      } else if (arg.equals("--minimal-maindex")) {
+        builder.setMinimalMainDex(true);
       } else if (arg.equals("--pg-conf")) {
         builder.addProguardConfigurationFiles(Paths.get(args[++i]));
       } else if (arg.equals("--pg-map")) {
@@ -300,6 +316,7 @@ public class R8Command extends BaseCommand {
       Path outputPath,
       OutputMode outputMode,
       ImmutableList<ProguardConfigurationRule> mainDexKeepRules,
+      boolean minimalMainDex,
       ProguardConfiguration proguardConfiguration,
       CompilationMode mode,
       int minApiLevel,
@@ -311,6 +328,7 @@ public class R8Command extends BaseCommand {
     assert mainDexKeepRules != null;
     assert getOutputMode() == OutputMode.Indexed : "Only regular mode is supported in R8";
     this.mainDexKeepRules = mainDexKeepRules;
+    this.minimalMainDex = minimalMainDex;
     this.proguardConfiguration = proguardConfiguration;
     this.useTreeShaking = useTreeShaking;
     this.useMinification = useMinification;
@@ -320,6 +338,7 @@ public class R8Command extends BaseCommand {
   private R8Command(boolean printHelp, boolean printVersion) {
     super(printHelp, printVersion);
     mainDexKeepRules = ImmutableList.of();
+    minimalMainDex = false;
     proguardConfiguration = null;
     useTreeShaking = false;
     useMinification = false;
@@ -375,9 +394,16 @@ public class R8Command extends BaseCommand {
     internal.classObfuscationDictionary = proguardConfiguration.getClassObfuscationDictionary();
     internal.obfuscationDictionary = proguardConfiguration.getObfuscationDictionary();
     internal.mainDexKeepRules = mainDexKeepRules;
+    internal.minimalMainDex = minimalMainDex;
     internal.keepRules = proguardConfiguration.getRules();
     internal.dontWarnPatterns = proguardConfiguration.getDontWarnPatterns();
     internal.outputMode = getOutputMode();
+    if (internal.debug) {
+      // TODO(zerny): Should we support removeSwitchMaps in debug mode? b/62936642
+      internal.removeSwitchMaps = false;
+      // TODO(zerny): Should we support inlining in debug mode? b/62937285
+      internal.inlineAccessors = false;
+    }
     return internal;
   }
 }

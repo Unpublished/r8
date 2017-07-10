@@ -4,33 +4,31 @@
 package com.android.tools.r8.dex;
 
 public class Segment {
-
-  final int type;
-  final int size;
+  public final int type;
+  public final int length;
   public final int offset;
-  int end;
+  private int end;
 
-  public Segment(int type, int unused, int size, int offset) {
+  public Segment(int type, int unused, int length, int offset) {
     this.type = type;
     assert unused == 0;
-    this.size = size;
+    this.length = length;
     this.offset = offset;
     this.end = -1;
-  }
-
-  public int getType() {
-    return type;
-  }
-
-  public int getSize() {
-    return size;
   }
 
   void setEnd(int end) {
     this.end = end;
   }
 
-  String typeName() {
+  // Returns the byte size of this segment.
+  public int size() {
+    return end - offset;
+  }
+
+  public String typeName() {
+    // Type names are in UpperCamelCase because they're used as labels in
+    // benchmarks.
     switch (type) {
       case Constants.TYPE_HEADER_ITEM:
         return "Header";
@@ -45,35 +43,35 @@ public class Segment {
       case Constants.TYPE_METHOD_ID_ITEM:
         return "Methods";
       case Constants.TYPE_CLASS_DEF_ITEM:
-        return "Class defs";
+        return "ClassDefs";
       case Constants.TYPE_MAP_LIST:
         return "Maps";
       case Constants.TYPE_TYPE_LIST:
-        return "Type lists";
+        return "TypeLists";
       case Constants.TYPE_ANNOTATION_SET_REF_LIST:
-        return "Annotation set refs";
+        return "AnnotationSetRefs";
       case Constants.TYPE_ANNOTATION_SET_ITEM:
-        return "Annotation sets";
+        return "AnnotationSets";
       case Constants.TYPE_CLASS_DATA_ITEM:
-        return "Class data";
+        return "ClassData";
       case Constants.TYPE_CODE_ITEM:
         return "Code";
       case Constants.TYPE_STRING_DATA_ITEM:
-        return "String data";
+        return "StringData";
       case Constants.TYPE_DEBUG_INFO_ITEM:
-        return "Debug info";
+        return "DebugInfo";
       case Constants.TYPE_ANNOTATION_ITEM:
         return "Annotation";
       case Constants.TYPE_ENCODED_ARRAY_ITEM:
-        return "Encoded arrays";
+        return "EncodedArrays";
       case Constants.TYPE_ANNOTATIONS_DIRECTORY_ITEM:
-        return "Annotations directory";
+        return "AnnotationsDirectory";
       default:
         return "Unknown";
     }
   }
 
   public String toString() {
-    return typeName() + " @" + offset + " " + size;
+    return typeName() + " @" + offset + " " + length;
   }
 }

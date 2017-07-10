@@ -7,12 +7,14 @@ import com.android.tools.r8.dex.Constants;
 import com.android.tools.r8.errors.CompilationError;
 import com.android.tools.r8.graph.DexEncodedMethod;
 import com.android.tools.r8.graph.DexItemFactory;
+import com.android.tools.r8.ir.conversion.CallGraph;
 import com.android.tools.r8.shaking.ProguardConfigurationRule;
 import com.android.tools.r8.shaking.ProguardTypeMatcher;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.function.BiFunction;
 
 public class InternalOptions {
 
@@ -43,8 +45,6 @@ public class InternalOptions {
   public boolean verbose = false;
   // Silencing output.
   public boolean quiet = false;
-  // Eagerly fill dex files as much as possible.
-  public boolean fillDexFiles = false;
 
   public List<String> methodsFilter = ImmutableList.of();
   public int minApiLevel = Constants.DEFAULT_ANDROID_API;
@@ -74,9 +74,11 @@ public class InternalOptions {
   public boolean allowAccessModification = true;
   public boolean inlineAccessors = true;
   public boolean removeSwitchMaps = true;
+  public boolean disableAssertions = true;
   public final OutlineOptions outline = new OutlineOptions();
   public boolean debugKeepRules = false;
   public final AttributeRemovalOptions attributeRemoval = new AttributeRemovalOptions();
+  public boolean allowParameterName = false;
 
   public boolean debug = false;
   public final TestingOptions testing = new TestingOptions();
@@ -86,6 +88,7 @@ public class InternalOptions {
   public List<String> obfuscationDictionary = ImmutableList.of();
 
   public ImmutableList<ProguardConfigurationRule> mainDexKeepRules = ImmutableList.of();
+  public boolean minimalMainDex;
   public ImmutableList<ProguardConfigurationRule> keepRules = ImmutableList.of();
   public ImmutableSet<ProguardTypeMatcher> dontWarnPatterns = ImmutableSet.of();
 
@@ -136,7 +139,7 @@ public class InternalOptions {
 
   public static class TestingOptions {
 
-    public boolean randomizeCallGraphLeaves = false;
+    public BiFunction<List<DexEncodedMethod>, CallGraph.Leaves, List<DexEncodedMethod>> irOrdering;
   }
 
   public static class AttributeRemovalOptions {
@@ -271,7 +274,7 @@ public class InternalOptions {
     return minApiLevel >= Constants.ANDROID_N_API;
   }
 
-  public boolean canUseObjectsNonNull() {
+  public boolean canUseLongCompareAndObjectsNonNull() {
     return minApiLevel >= Constants.ANDROID_K_API;
   }
 
@@ -283,4 +286,10 @@ public class InternalOptions {
     return minApiLevel >= Constants.ANDROID_N_API;
   }
 
+  // APIs for accessing parameter names annotations are not available before Android O, thus does
+  // not emit them to avoid wasting space in Dex files because runtimes before Android O will ignore
+  // them.
+  public boolean canUseParameterNameAnnotations() {
+    return minApiLevel >= Constants.ANDROID_O_API;
+  }
 }

@@ -20,9 +20,11 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Queue;
 import java.util.TreeMap;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.apache.harmony.jpda.tests.framework.jdwp.CommandPacket;
 import org.apache.harmony.jpda.tests.framework.jdwp.Event;
@@ -71,7 +73,7 @@ public abstract class DebugTestBase {
     ART
   }
 
-  // Set to true to run tests with java
+  // Set to JAVA to run tests with java
   private static final RuntimeKind RUNTIME_KIND = RuntimeKind.ART;
 
   // Set to true to enable verbose logs
@@ -212,7 +214,7 @@ public abstract class DebugTestBase {
   }
 
   protected final JUnit3Wrapper.Command stepOver(StepFilter stepFilter) {
-    return step(StepDepth.OVER, stepFilter);
+    return step(StepKind.OVER, stepFilter);
   }
 
   protected final JUnit3Wrapper.Command stepOut() {
@@ -220,7 +222,7 @@ public abstract class DebugTestBase {
   }
 
   protected final JUnit3Wrapper.Command stepOut(StepFilter stepFilter) {
-    return step(StepDepth.OUT, stepFilter);
+    return step(StepKind.OUT, stepFilter);
   }
 
   protected final JUnit3Wrapper.Command stepInto() {
@@ -228,12 +230,46 @@ public abstract class DebugTestBase {
   }
 
   protected final JUnit3Wrapper.Command stepInto(StepFilter stepFilter) {
-    return step(StepDepth.INTO, stepFilter);
+    return step(StepKind.INTO, stepFilter);
   }
 
-  private JUnit3Wrapper.Command step(byte stepDepth,
+  public enum StepKind {
+    INTO(StepDepth.INTO),
+    OVER(StepDepth.OVER),
+    OUT(StepDepth.OUT);
+
+    private final byte jdwpValue;
+
+    StepKind(byte jdwpValue) {
+      this.jdwpValue = jdwpValue;
+    }
+  }
+
+  public enum StepLevel {
+    LINE(StepSize.LINE),
+    INSTRUCTION(StepSize.MIN);
+
+    private final byte jdwpValue;
+
+    StepLevel(byte jdwpValue) {
+      this.jdwpValue = jdwpValue;
+    }
+  }
+
+  private JUnit3Wrapper.Command step(StepKind stepKind, StepFilter stepFilter) {
+    return step(stepKind, StepLevel.LINE, stepFilter);
+  }
+
+  private JUnit3Wrapper.Command step(StepKind stepKind, StepLevel stepLevel,
       StepFilter stepFilter) {
-    return new JUnit3Wrapper.Command.StepCommand(stepDepth, stepFilter);
+    return new JUnit3Wrapper.Command.StepCommand(stepKind.jdwpValue, stepLevel.jdwpValue,
+        stepFilter, state -> true);
+  }
+
+  protected JUnit3Wrapper.Command stepUntil(StepKind stepKind, StepLevel stepLevel,
+      Function<JUnit3Wrapper.DebuggeeState, Boolean> stepUntil) {
+    return new JUnit3Wrapper.Command.StepCommand(stepKind.jdwpValue, stepLevel.jdwpValue, NO_FILTER,
+        stepUntil);
   }
 
   protected final JUnit3Wrapper.Command checkLocal(String localName) {
@@ -244,14 +280,24 @@ public abstract class DebugTestBase {
     return inspect(t -> t.checkLocal(localName, expectedValue));
   }
 
+  protected final JUnit3Wrapper.Command checkNoLocal(String localName) {
+    return inspect(t -> {
+      List<String> localNames = t.getLocalNames();
+      Assert.assertFalse("Unexpected local: " + localName, localNames.contains(localName));
+    });
+  }
+
   protected final JUnit3Wrapper.Command checkNoLocal() {
-    return inspect(t -> Assert.assertTrue(t.getLocalNames().isEmpty()));
+    return inspect(t -> {
+      List<String> localNames = t.getLocalNames();
+      Assert.assertTrue("Local variables: " + String.join(",", localNames), localNames.isEmpty());
+    });
   }
 
   protected final JUnit3Wrapper.Command checkLine(String sourceFile, int line) {
     return inspect(t -> {
-      Assert.assertEquals(sourceFile, t.getCurrentSourceFile());
-      Assert.assertEquals(line, t.getCurrentLineNumber());
+      Assert.assertEquals(sourceFile, t.getSourceFile());
+      Assert.assertEquals(line, t.getLineNumber());
     });
   }
 
@@ -262,11 +308,11 @@ public abstract class DebugTestBase {
   protected final JUnit3Wrapper.Command checkMethod(String className, String methodName,
       String methodSignature) {
     return inspect(t -> {
-      Assert.assertEquals("Incorrect class name", className, t.getCurrentClassName());
-      Assert.assertEquals("Incorrect method name", methodName, t.getCurrentMethodName());
+      Assert.assertEquals("Incorrect class name", className, t.getClassName());
+      Assert.assertEquals("Incorrect method name", methodName, t.getMethodName());
       if (methodSignature != null) {
         Assert.assertEquals("Incorrect method signature", methodSignature,
-            t.getCurrentMethodSignature());
+            t.getMethodSignature());
       }
     });
   }
@@ -391,16 +437,18 @@ public abstract class DebugTestBase {
         // Capture the context of the event suspension.
         updateEventContext((EventThread) parsedEvent);
 
-        if (DEBUG_TESTS && debuggeeState.location != null) {
+        if (DEBUG_TESTS && debuggeeState.getLocation() != null) {
           // Dump location
-          String classSig = getMirror().getClassSignature(debuggeeState.location.classID);
+          String classSig = getMirror().getClassSignature(debuggeeState.getLocation().classID);
           String methodName = getMirror()
-              .getMethodName(debuggeeState.location.classID, debuggeeState.location.methodID);
+              .getMethodName(debuggeeState.getLocation().classID,
+                  debuggeeState.getLocation().methodID);
           String methodSig = getMirror()
-              .getMethodSignature(debuggeeState.location.classID, debuggeeState.location.methodID);
+              .getMethodSignature(debuggeeState.getLocation().classID,
+                  debuggeeState.getLocation().methodID);
           System.out.println(String
-              .format("Suspended in %s#%s%s@%x", classSig, methodName, methodSig,
-                  Long.valueOf(debuggeeState.location.index)));
+              .format("Suspended in %s#%s%s@0x%x", classSig, methodName, methodSig,
+                  Long.valueOf(debuggeeState.getLocation().index)));
         }
 
         // Handle event.
@@ -447,144 +495,281 @@ public abstract class DebugTestBase {
     // Inspection
     //
 
-    /**
-     * Allows to inspect the state of a debuggee when it is suspended.
-     */
-    public class DebuggeeState {
+    public interface FrameInspector {
+      long getFrameId();
+      Location getLocation();
 
+      int getLineNumber();
+      String getSourceFile();
+      String getClassName();
+      String getClassSignature();
+      String getMethodName();
+      String getMethodSignature();
+
+      // Locals
+
+      /**
+       * Returns the names of all local variables visible at the current location
+       */
+      List<String> getLocalNames();
+
+      /**
+       * Returns the values of all locals visible at the current location.
+       */
+      Map<String, Value> getLocalValues();
+      void checkLocal(String localName);
+      void checkLocal(String localName, Value expectedValue);
+    }
+
+    public static class DebuggeeState implements FrameInspector {
+
+      private class DebuggeeFrame implements FrameInspector {
+        private final long frameId;
+        private final Location location;
+
+        public DebuggeeFrame(long frameId, Location location) {
+          this.frameId = frameId;
+          this.location = location;
+        }
+
+        public long getFrameId() {
+          return frameId;
+        }
+
+        public Location getLocation() {
+          return location;
+        }
+
+        public int getLineNumber() {
+          Location location = getLocation();
+          ReplyPacket reply = getMirror().getLineTable(location.classID, location.methodID);
+          if (reply.getErrorCode() != 0) {
+            return -1;
+          }
+
+          long startCodeIndex = reply.getNextValueAsLong();
+          long endCodeIndex = reply.getNextValueAsLong();
+          int lines = reply.getNextValueAsInt();
+          int line = -1;
+          long previousLineCodeIndex = -1;
+          for (int i = 0; i < lines; ++i) {
+            long currentLineCodeIndex = reply.getNextValueAsLong();
+            int currentLineNumber = reply.getNextValueAsInt();
+
+            // Code indices are in ascending order.
+            assert currentLineCodeIndex >= startCodeIndex;
+            assert currentLineCodeIndex <= endCodeIndex;
+            assert currentLineCodeIndex > previousLineCodeIndex;
+            previousLineCodeIndex = currentLineCodeIndex;
+
+            if (location.index >= currentLineCodeIndex) {
+              line = currentLineNumber;
+            } else {
+              break;
+            }
+          }
+
+          return line;
+        }
+
+        public String getSourceFile() {
+          Location location = getLocation();
+          CommandPacket sourceFileCommand = new CommandPacket(
+              JDWPCommands.ReferenceTypeCommandSet.CommandSetID,
+              JDWPCommands.ReferenceTypeCommandSet.SourceFileCommand);
+          sourceFileCommand.setNextValueAsReferenceTypeID(location.classID);
+          ReplyPacket replyPacket = getMirror().performCommand(sourceFileCommand);
+          if (replyPacket.getErrorCode() != 0) {
+            return null;
+          } else {
+            return replyPacket.getNextValueAsString();
+          }
+        }
+
+        public List<String> getLocalNames() {
+          Location location = getLocation();
+          return JUnit3Wrapper.getVariablesAt(mirror, location).stream()
+              .map(v -> v.getName())
+              .collect(Collectors.toList());
+        }
+
+        @Override
+        public Map<String, Value> getLocalValues() {
+          return JUnit3Wrapper.getVariablesAt(mirror, location).stream()
+              .collect(Collectors.toMap(
+                  v -> v.getName(),
+                  v -> {
+                    // Get local value
+                    CommandPacket commandPacket = new CommandPacket(
+                        JDWPCommands.StackFrameCommandSet.CommandSetID,
+                        JDWPCommands.StackFrameCommandSet.GetValuesCommand);
+                    commandPacket.setNextValueAsThreadID(getThreadId());
+                    commandPacket.setNextValueAsFrameID(getFrameId());
+                    commandPacket.setNextValueAsInt(1);
+                    commandPacket.setNextValueAsInt(v.getSlot());
+                    commandPacket.setNextValueAsByte(v.getTag());
+                    ReplyPacket replyPacket = getMirror().performCommand(commandPacket);
+                    int valuesCount = replyPacket.getNextValueAsInt();
+                    assert valuesCount == 1;
+                    return replyPacket.getNextValueAsValue();
+                  }
+              ));
+        }
+
+        public void checkLocal(String localName) {
+          Optional<Variable> localVar = JUnit3Wrapper
+              .getVariableAt(mirror, getLocation(), localName);
+          Assert.assertTrue("No local '" + localName + "'", localVar.isPresent());
+        }
+
+        public void checkLocal(String localName, Value expectedValue) {
+          Optional<Variable> localVar = getVariableAt(mirror, getLocation(), localName);
+          Assert.assertTrue("No local '" + localName + "'", localVar.isPresent());
+
+          // Get value
+          CommandPacket commandPacket = new CommandPacket(
+              JDWPCommands.StackFrameCommandSet.CommandSetID,
+              JDWPCommands.StackFrameCommandSet.GetValuesCommand);
+          commandPacket.setNextValueAsThreadID(getThreadId());
+          commandPacket.setNextValueAsFrameID(getFrameId());
+          commandPacket.setNextValueAsInt(1);
+          commandPacket.setNextValueAsInt(localVar.get().getSlot());
+          commandPacket.setNextValueAsByte(localVar.get().getTag());
+          ReplyPacket replyPacket = getMirror().performCommand(commandPacket);
+          int valuesCount = replyPacket.getNextValueAsInt();
+          assert valuesCount == 1;
+          Value localValue = replyPacket.getNextValueAsValue();
+
+          Assert.assertEquals(expectedValue, localValue);
+        }
+
+        public String getClassName() {
+          String classSignature = getClassSignature();
+          assert classSignature.charAt(0) == 'L';
+          // Remove leading 'L' and trailing ';'
+          classSignature = classSignature.substring(1, classSignature.length() - 1);
+          // Return fully qualified name
+          return classSignature.replace('/', '.');
+        }
+
+        public String getClassSignature() {
+          Location location = getLocation();
+          return getMirror().getClassSignature(location.classID);
+        }
+
+        public String getMethodName() {
+          Location location = getLocation();
+          return getMirror().getMethodName(location.classID, location.methodID);
+        }
+
+        public String getMethodSignature() {
+          Location location = getLocation();
+          CommandPacket command = new CommandPacket(ReferenceTypeCommandSet.CommandSetID,
+              ReferenceTypeCommandSet.MethodsWithGenericCommand);
+          command.setNextValueAsReferenceTypeID(location.classID);
+
+          ReplyPacket reply = getMirror().performCommand(command);
+          assert reply.getErrorCode() == Error.NONE;
+          int methods = reply.getNextValueAsInt();
+
+          for (int i = 0; i < methods; ++i) {
+            long methodId = reply.getNextValueAsMethodID();
+            reply.getNextValueAsString(); // skip name
+            String methodSignature = reply.getNextValueAsString();
+            reply.getNextValueAsString(); // skip generic signature
+            reply.getNextValueAsInt();  // skip modifiers
+            if (methodId == location.methodID) {
+              return methodSignature;
+            }
+          }
+          throw new AssertionError("No method info for the current location");
+        }
+      }
+
+      private final VmMirror mirror;
       private final long threadId;
-      private final long frameId;
-      private final Location location;
+      private final List<DebuggeeFrame> frames;
 
-      public DebuggeeState(long threadId, long frameId, Location location) {
+      public DebuggeeState(VmMirror mirror, long threadId, List<DebuggeeFrame> frames) {
+        this.mirror = mirror;
         this.threadId = threadId;
-        this.frameId = frameId;
-        this.location = location;
+        this.frames = frames;
+      }
+
+      public VmMirror getMirror() {
+        return mirror;
       }
 
       public long getThreadId() {
         return threadId;
       }
 
+      public FrameInspector getFrame(int index) {
+        return frames.get(index);
+      }
+
+      public FrameInspector getTopFrame() {
+        return getFrame(0);
+      }
+
+      @Override
       public long getFrameId() {
-        return frameId;
+        return getTopFrame().getFrameId();
       }
 
+      @Override
       public Location getLocation() {
-        return this.location;
+        return frames.isEmpty() ? null : getTopFrame().getLocation();
       }
 
+      @Override
       public void checkLocal(String localName) {
-        getVariableAt(getLocation(), localName);
+        getTopFrame().checkLocal(localName);
       }
 
+      @Override
       public void checkLocal(String localName, Value expectedValue) {
-        Variable localVar = getVariableAt(getLocation(), localName);
-
-        // Get value
-        CommandPacket commandPacket = new CommandPacket(
-            JDWPCommands.StackFrameCommandSet.CommandSetID,
-            JDWPCommands.StackFrameCommandSet.GetValuesCommand);
-        commandPacket.setNextValueAsThreadID(getThreadId());
-        commandPacket.setNextValueAsFrameID(getFrameId());
-        commandPacket.setNextValueAsInt(1);
-        commandPacket.setNextValueAsInt(localVar.getSlot());
-        commandPacket.setNextValueAsByte(localVar.getTag());
-        ReplyPacket replyPacket = getMirror().performCommand(commandPacket);
-        checkReplyPacket(replyPacket, "StackFrame.GetValues command");
-        int valuesCount = replyPacket.getNextValueAsInt();
-        assert valuesCount == 1;
-        Value localValue = replyPacket.getNextValueAsValue();
-        assertAllDataRead(replyPacket);
-
-        Assert.assertEquals(expectedValue, localValue);
+        getTopFrame().checkLocal(localName, expectedValue);
       }
 
-      public int getCurrentLineNumber() {
-        ReplyPacket reply = getMirror().getLineTable(location.classID, location.methodID);
-        if (reply.getErrorCode() != 0) {
-          return -1;
-        }
-
-        long startCodeIndex = reply.getNextValueAsLong();
-        long endCodeIndex = reply.getNextValueAsLong();
-        int lines = reply.getNextValueAsInt();
-        int line = -1;
-        long previousLineCodeIndex = -1;
-        for (int i = 0; i < lines; ++i) {
-          long currentLineCodeIndex = reply.getNextValueAsLong();
-          int currentLineNumber = reply.getNextValueAsInt();
-
-          // Code indices are in ascending order.
-          assert currentLineCodeIndex >= startCodeIndex;
-          assert currentLineCodeIndex <= endCodeIndex;
-          assert currentLineCodeIndex > previousLineCodeIndex;
-          previousLineCodeIndex = currentLineCodeIndex;
-
-          if (location.index >= currentLineCodeIndex) {
-            line = currentLineNumber;
-          } else {
-            break;
-          }
-        }
-
-        return line;
+      @Override
+      public int getLineNumber() {
+        return getTopFrame().getLineNumber();
       }
 
-      public String getCurrentSourceFile() {
-        CommandPacket sourceFileCommand = new CommandPacket(
-            JDWPCommands.ReferenceTypeCommandSet.CommandSetID,
-            JDWPCommands.ReferenceTypeCommandSet.SourceFileCommand);
-        sourceFileCommand.setNextValueAsReferenceTypeID(location.classID);
-        ReplyPacket replyPacket = getMirror().performCommand(sourceFileCommand);
-        if (replyPacket.getErrorCode() != 0) {
-          return null;
-        } else {
-          return replyPacket.getNextValueAsString();
-        }
+      @Override
+      public String getSourceFile() {
+        return getTopFrame().getSourceFile();
       }
 
+      @Override
       public List<String> getLocalNames() {
-        return getVariablesAt(location).stream().map(v -> v.getName()).collect(Collectors.toList());
+        return getTopFrame().getLocalNames();
       }
 
-      public String getCurrentClassName() {
-        String classSignature = getCurrentClassSignature();
-        assert classSignature.charAt(0) == 'L';
-        // Remove leading 'L' and trailing ';'
-        classSignature = classSignature.substring(1, classSignature.length() - 1);
-        // Return fully qualified name
-        return classSignature.replace('/', '.');
+      @Override
+      public Map<String, Value> getLocalValues() {
+        return getTopFrame().getLocalValues();
       }
 
-      public String getCurrentClassSignature() {
-        return getMirror().getClassSignature(location.classID);
+      @Override
+      public String getClassName() {
+        return getTopFrame().getClassName();
       }
 
-      public String getCurrentMethodName() {
-        return getMirror().getMethodName(location.classID, location.methodID);
+      @Override
+      public String getClassSignature() {
+        return getTopFrame().getClassSignature();
       }
 
-      public String getCurrentMethodSignature() {
-        CommandPacket command = new CommandPacket(ReferenceTypeCommandSet.CommandSetID,
-            ReferenceTypeCommandSet.MethodsWithGenericCommand);
-        command.setNextValueAsReferenceTypeID(location.classID);
+      @Override
+      public String getMethodName() {
+        return getTopFrame().getMethodName();
+      }
 
-        ReplyPacket reply = getMirror().performCommand(command);
-        assert reply.getErrorCode() == Error.NONE;
-        int methods = reply.getNextValueAsInt();
-
-        for (int i = 0; i < methods; ++i) {
-          long methodId = reply.getNextValueAsMethodID();
-          reply.getNextValueAsString(); // skip name
-          String methodSignature = reply.getNextValueAsString();
-          reply.getNextValueAsString(); // skip generic signature
-          reply.getNextValueAsInt();  // skip modifiers
-          if (methodId == location.methodID) {
-            return methodSignature;
-          }
-        }
-        throw new AssertionError("No method info for the current location");
+      @Override
+      public String getMethodSignature() {
+        return getTopFrame().getMethodSignature();
       }
     }
 
@@ -594,22 +779,22 @@ public abstract class DebugTestBase {
       return index >= varStart && index < varEnd;
     }
 
-    private Variable getVariableAt(Location location, String localName) {
-      return getVariablesAt(location).stream()
+    private static Optional<Variable> getVariableAt(VmMirror mirror, Location location,
+        String localName) {
+      return getVariablesAt(mirror, location).stream()
           .filter(v -> localName.equals(v.getName()))
-          .findFirst()
-          .get();
+          .findFirst();
     }
 
-    private List<Variable> getVariablesAt(Location location) {
+    private static List<Variable> getVariablesAt(VmMirror mirror, Location location) {
       // Get variable table and keep only variables visible at this location.
-      return getVariables(location.classID, location.methodID).stream()
+      return getVariables(mirror, location.classID, location.methodID).stream()
           .filter(v -> inScope(location.index, v))
           .collect(Collectors.toList());
     }
 
-    private List<Variable> getVariables(long classID, long methodID) {
-      List<Variable> list = getMirror().getVariableTable(classID, methodID);
+    private static List<Variable> getVariables(VmMirror mirror, long classID, long methodID) {
+      List<Variable> list = mirror.getVariableTable(classID, methodID);
       return list != null ? list : Collections.emptyList();
     }
 
@@ -622,23 +807,25 @@ public abstract class DebugTestBase {
     }
 
     private void updateEventContext(EventThread event) {
-      long threadId = event.getThreadID();
-      long frameId = -1;
-      Location location = null;
-      // ART returns an error if we ask for frames when there is none. Workaround by asking the frame
-      // count first.
+      final long threadId = event.getThreadID();
+      final List<JUnit3Wrapper.DebuggeeState.DebuggeeFrame> frames = new ArrayList<>();
+      debuggeeState = new DebuggeeState(getMirror(), threadId, frames);
+
+      // ART returns an error if we ask for frames when there is none. Workaround by asking the
+      // frame count first.
       int frameCount = getMirror().getFrameCount(threadId);
       if (frameCount > 0) {
-        ReplyPacket replyPacket = getMirror().getThreadFrames(threadId, 0, 1);
-        {
-          int number = replyPacket.getNextValueAsInt();
-          assertEquals(1, number);
+        ReplyPacket replyPacket = getMirror().getThreadFrames(threadId, 0, frameCount);
+        int number = replyPacket.getNextValueAsInt();
+        assertEquals(frameCount, number);
+
+        for (int i = 0; i < frameCount; ++i) {
+          long frameId = replyPacket.getNextValueAsFrameID();
+          Location location = replyPacket.getNextValueAsLocation();
+          frames.add(debuggeeState.new DebuggeeFrame(frameId, location));
         }
-        frameId = replyPacket.getNextValueAsFrameID();
-        location = replyPacket.getNextValueAsLocation();
         assertAllDataRead(replyPacket);
       }
-      debuggeeState = new DebuggeeState(threadId, frameId, location);
     }
 
     private VmMirror getMirror() {
@@ -814,12 +1001,22 @@ public abstract class DebugTestBase {
       class StepCommand implements Command {
 
         private final byte stepDepth;
+        private final byte stepSize;
         private final StepFilter stepFilter;
 
+        /**
+         * A {@link Function} taking a {@link DebuggeeState} as input and returns {@code true} to
+         * stop stepping, {@code false} to continue.
+         */
+        private final Function<JUnit3Wrapper.DebuggeeState, Boolean> stepUntil;
+
         public StepCommand(byte stepDepth,
-            StepFilter stepFilter) {
+            byte stepSize, StepFilter stepFilter,
+            Function<DebuggeeState, Boolean> stepUntil) {
           this.stepDepth = stepDepth;
+          this.stepSize = stepSize;
           this.stepFilter = stepFilter;
+          this.stepUntil = stepUntil;
         }
 
         @Override
@@ -828,13 +1025,14 @@ public abstract class DebugTestBase {
           int stepRequestID;
           {
             EventBuilder eventBuilder = Event.builder(EventKind.SINGLE_STEP, SuspendPolicy.ALL);
-            eventBuilder.setStep(threadId, StepSize.LINE, stepDepth);
+            eventBuilder.setStep(threadId, stepSize, stepDepth);
             stepFilter.getExcludedClasses().stream().forEach(s -> eventBuilder.setClassExclude(s));
             ReplyPacket replyPacket = testBase.getMirror().setEvent(eventBuilder.build());
             stepRequestID = replyPacket.getNextValueAsInt();
             testBase.assertAllDataRead(replyPacket);
           }
-          testBase.events.put(stepRequestID, new StepEventHandler(stepRequestID, stepFilter));
+          testBase.events.put(stepRequestID, new StepEventHandler(stepRequestID, stepFilter,
+              stepUntil));
 
           // Resume all threads.
           testBase.resume();
@@ -842,7 +1040,8 @@ public abstract class DebugTestBase {
 
         @Override
         public String toString() {
-          return "step " + JDWPConstants.StepDepth.getName(stepDepth);
+          return String.format("step %s/%s", JDWPConstants.StepDepth.getName(stepDepth),
+              JDWPConstants.StepSize.getName(stepSize));
         }
       }
 
@@ -858,13 +1057,16 @@ public abstract class DebugTestBase {
 
         @Override
         public void perform(JUnit3Wrapper testBase) {
-          Variable v = testBase.getVariableAt(testBase.debuggeeState.location, localName);
+          Optional<Variable> localVar =
+              getVariableAt(testBase.getMirror(), testBase.debuggeeState.getLocation(), localName);
+          Assert.assertTrue("No local '" + localName + "'", localVar.isPresent());
+
           CommandPacket setValues = new CommandPacket(StackFrameCommandSet.CommandSetID,
               StackFrameCommandSet.SetValuesCommand);
           setValues.setNextValueAsThreadID(testBase.getDebuggeeState().getThreadId());
           setValues.setNextValueAsFrameID(testBase.getDebuggeeState().getFrameId());
           setValues.setNextValueAsInt(1);
-          setValues.setNextValueAsInt(v.getSlot());
+          setValues.setNextValueAsInt(localVar.get().getSlot());
           setValues.setNextValueAsValue(newValue);
           ReplyPacket replyPacket = testBase.getMirror().performCommand(setValues);
           testBase.checkReplyPacket(replyPacket, "StackFrame.SetValues");
@@ -892,11 +1094,14 @@ public abstract class DebugTestBase {
 
       private final int stepRequestID;
       private final StepFilter stepFilter;
+      private final Function<DebuggeeState, Boolean> stepUntil;
 
       private StepEventHandler(int stepRequestID,
-          StepFilter stepFilter) {
+          StepFilter stepFilter,
+          Function<DebuggeeState, Boolean> stepUntil) {
         this.stepRequestID = stepRequestID;
         this.stepFilter = stepFilter;
+        this.stepUntil = stepUntil;
       }
 
       @Override
@@ -904,6 +1109,9 @@ public abstract class DebugTestBase {
         if (stepFilter
             .skipLocation(testBase.getMirror(), testBase.getDebuggeeState().getLocation())) {
           // Keep the step active and resume so that we do another step.
+          testBase.resume();
+        } else if (stepUntil.apply(testBase.getDebuggeeState()) == Boolean.FALSE) {
+          // We must not stop yet.
           testBase.resume();
         } else {
           // When hit, the single step must be cleared.

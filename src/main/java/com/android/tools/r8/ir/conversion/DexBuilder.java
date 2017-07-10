@@ -44,6 +44,7 @@ import com.android.tools.r8.graph.DexType;
 import com.android.tools.r8.ir.code.Argument;
 import com.android.tools.r8.ir.code.BasicBlock;
 import com.android.tools.r8.ir.code.CatchHandlers;
+import com.android.tools.r8.ir.code.DebugPosition;
 import com.android.tools.r8.ir.code.IRCode;
 import com.android.tools.r8.ir.code.If;
 import com.android.tools.r8.ir.code.InstructionIterator;
@@ -58,6 +59,7 @@ import com.google.common.collect.HashBiMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.ListIterator;
 import java.util.Map;
@@ -191,27 +193,16 @@ public class DexBuilder {
     } while (!ifsNeedingRewrite.isEmpty());
 
     // Build instructions.
-    DexDebugEventBuilder debugEventBuilder =
-        new DexDebugEventBuilder(ir.method.method, dexItemFactory);
+    DexDebugEventBuilder debugEventBuilder = new DexDebugEventBuilder(ir.method, dexItemFactory);
     List<Instruction> dexInstructions = new ArrayList<>(numberOfInstructions);
     int instructionOffset = 0;
     InstructionIterator instructionIterator = ir.instructionIterator();
-    int lastMoveExceptionOffset = -1;
     while (instructionIterator.hasNext()) {
       com.android.tools.r8.ir.code.Instruction ir = instructionIterator.next();
       Info info = getInfo(ir);
       int previousInstructionCount = dexInstructions.size();
       info.addInstructions(this, dexInstructions);
-
-      if (ir.isArgument()) {
-        int register = registerAllocator.getRegisterForValue(ir.outValue(), ir.getNumber());
-        debugEventBuilder.startArgument(register, ir.getLocalInfo(), ir.outValue().isThis());
-      } else if (ir.isDebugPosition()) {
-        int pc = lastMoveExceptionOffset >= 0 ? lastMoveExceptionOffset : instructionOffset;
-        debugEventBuilder.setPosition(pc, ir.asDebugPosition());
-      }
-      lastMoveExceptionOffset = ir.isMoveException() ? instructionOffset : -1;
-
+      debugEventBuilder.add(instructionOffset, ir);
       if (previousInstructionCount < dexInstructions.size()) {
         while (previousInstructionCount < dexInstructions.size()) {
           Instruction instruction = dexInstructions.get(previousInstructionCount++);
@@ -349,6 +340,38 @@ public class DexBuilder {
     add(instruction, new FallThroughInfo(instruction));
   }
 
+  private boolean isNopInstruction(com.android.tools.r8.ir.code.Instruction instruction) {
+    return instruction.isDebugLocalsChange()
+        || (instruction.isConstNumber() && !instruction.outValue().needsRegister());
+  }
+
+  public void addDebugPosition(DebugPosition position) {
+    BasicBlock block = position.getBlock();
+    int blockIndex = ir.blocks.indexOf(block);
+    Iterator<com.android.tools.r8.ir.code.Instruction> iterator = block.listIterator(position);
+
+    com.android.tools.r8.ir.code.Instruction next = null;
+    while (next == null) {
+      next = iterator.next();
+      while (isNopInstruction(next)) {
+        next = iterator.next();
+      }
+      if (next.isGoto()) {
+        ++blockIndex;
+        BasicBlock nextBlock = blockIndex < ir.blocks.size() ? ir.blocks.get(blockIndex) : null;
+        if (next.asGoto().getTarget() == nextBlock) {
+          iterator = nextBlock.iterator();
+          next = null;
+        }
+      }
+    }
+    if (next.isDebugPosition()) {
+      add(position, new FixedSizeInfo(position, new Nop()));
+    } else {
+      addNop(position);
+    }
+  }
+
   public void add(com.android.tools.r8.ir.code.Instruction ir, Instruction dex) {
     assert !ir.isGoto();
     add(ir, new FixedSizeInfo(ir, dex));
@@ -428,7 +451,13 @@ public class DexBuilder {
       com.android.tools.r8.ir.code.Instruction targetInstruction = targetBlock.entry();
       targets[i] = getInfo(targetInstruction).getOffset() - getInfo(ir).getOffset();
     }
-    return ir.buildPayload(targets);
+    BasicBlock fallthroughBlock = ir.fallthroughBlock();
+    com.android.tools.r8.ir.code.Instruction fallthroughTargetInstruction =
+        fallthroughBlock.entry();
+    int fallthroughTarget =
+        getInfo(fallthroughTargetInstruction).getOffset() - getInfo(ir).getOffset();
+
+    return ir.buildPayload(targets, fallthroughTarget);
   }
 
   // Helpers for computing the try items and handlers.

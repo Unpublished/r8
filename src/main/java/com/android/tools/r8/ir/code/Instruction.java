@@ -15,6 +15,7 @@ import com.android.tools.r8.utils.CfgPrinter;
 import com.android.tools.r8.utils.InternalOptions;
 import com.android.tools.r8.utils.StringUtils;
 import com.android.tools.r8.utils.StringUtils.BraceType;
+import com.google.common.collect.ImmutableList;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -24,6 +25,7 @@ public abstract class Instruction {
   protected final List<Value> inValues = new ArrayList<>();
   private BasicBlock block = null;
   private int number = -1;
+  private List<Value> debugValues = null;
 
   protected Instruction(Value outValue) {
     setOutValue(outValue);
@@ -70,11 +72,23 @@ public abstract class Instruction {
     }
   }
 
+  public void addDebugValue(Value value) {
+    assert value.getLocalInfo() != null;
+    if (debugValues == null) {
+      debugValues = new ArrayList<>();
+    }
+    debugValues.add(value);
+    value.addDebugUser(this);
+  }
+
   public static void clearUserInfo(Instruction instruction) {
     if (instruction.outValue != null) {
       instruction.outValue.clearUsersInfo();
     }
     instruction.inValues.forEach(Value::clearUsersInfo);
+    if (instruction.debugValues != null) {
+      instruction.debugValues.forEach(Value::clearUsersInfo);
+    }
   }
 
   public final MoveType outType() {
@@ -83,11 +97,35 @@ public abstract class Instruction {
 
   public abstract void buildDex(DexBuilder builder);
 
-  public void replacePhi(Phi phi, Value value) {
+  public void replaceValue(Value oldValue, Value newValue) {
     for (int i = 0; i < inValues.size(); i++) {
-      if (phi == inValues.get(i)) {
-        inValues.set(i, value);
-        value.addUser(this);
+      if (oldValue == inValues.get(i)) {
+        inValues.set(i, newValue);
+        newValue.addUser(this);
+        oldValue.removeUser(this);
+      }
+    }
+  }
+
+  public void replaceDebugPhi(Phi phi, Value value) {
+    if (debugValues != null) {
+      for (int i = 0; i < debugValues.size(); i++) {
+        if (phi == debugValues.get(i)) {
+          if (value.getLocalInfo() == null) {
+            debugValues.remove(i);
+          } else {
+            debugValues.set(i, value);
+            value.addDebugUser(this);
+          }
+        }
+      }
+    }
+    if (phi == getPreviousLocalValue()) {
+      if (value.getDebugInfo() == null) {
+        replacePreviousLocalValue(null);
+      } else {
+        replacePreviousLocalValue(value);
+        value.addDebugUser(this);
       }
     }
   }
@@ -252,7 +290,7 @@ public abstract class Instruction {
   }
 
   /** Returns true is this instruction can be treated as dead code if its outputs are not used. */
-  public boolean canBeDeadCode(InternalOptions options) {
+  public boolean canBeDeadCode(IRCode code, InternalOptions options) {
     return !instructionInstanceCanThrow();
   }
 
@@ -295,6 +333,10 @@ public abstract class Instruction {
 
   public Value getPreviousLocalValue() {
     return outValue == null ? null : outValue.getPreviousLocalValue();
+  }
+
+  public List<Value> getDebugValues() {
+    return debugValues != null ? debugValues : ImmutableList.of();
   }
 
   public void replacePreviousLocalValue(Value value) {
@@ -671,8 +713,8 @@ public abstract class Instruction {
 
   public boolean isDebugInstruction() {
     return isDebugPosition()
+        || isDebugLocalsChange()
         || isDebugLocalWrite()
-        || isDebugLocalRead()
         || isDebugLocalUninitialized();
   }
 
@@ -681,6 +723,14 @@ public abstract class Instruction {
   }
 
   public DebugPosition asDebugPosition() {
+    return null;
+  }
+
+  public boolean isDebugLocalsChange() {
+    return false;
+  }
+
+  public DebugLocalsChange asDebugLocalsChange() {
     return null;
   }
 
@@ -697,14 +747,6 @@ public abstract class Instruction {
   }
 
   public DebugLocalWrite asDebugLocalWrite() {
-    return null;
-  }
-
-  public boolean isDebugLocalRead() {
-    return false;
-  }
-
-  public DebugLocalRead asDebugLocalRead() {
     return null;
   }
 

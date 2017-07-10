@@ -37,11 +37,12 @@ import com.android.tools.r8.utils.DescriptorUtils;
 import com.android.tools.r8.utils.InternalOptions;
 import com.android.tools.r8.utils.ThreadUtils;
 import com.android.tools.r8.utils.Timing;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
-import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -66,38 +67,86 @@ public class IRConverter {
   private final LensCodeRewriter lensCodeRewriter;
   private final Inliner inliner;
   private CallGraph callGraph;
+  private OptimizationFeedback ignoreOptimizationFeedback = new OptimizationFeedbackIgnore();
 
   private DexString highestSortingString;
 
-  public IRConverter(
+  private IRConverter(
+      Timing timing,
       DexApplication application,
       AppInfo appInfo,
+      GraphLense graphLense,
       InternalOptions options,
       CfgPrinter printer,
-      boolean enableDesugaring) {
-    this.timing = new Timing("Testing");
+      boolean enableDesugaring,
+      boolean enableWholeProgramOptimizations) {
+    assert application != null;
+    assert appInfo != null;
+    assert options != null;
+    this.timing = timing != null ? timing : new Timing("internal");
     this.application = application;
     this.appInfo = appInfo;
+    this.graphLense = graphLense != null ? graphLense : GraphLense.getIdentityLense();
     this.options = options;
     this.printer = printer;
-    this.graphLense = GraphLense.getIdentityLense();
-    this.inliner = null;
-    this.outliner = null;
-    this.codeRewriter = new CodeRewriter(appInfo);
-    this.memberValuePropagation = null;
+    Set<DexType> libraryClassesWithOptimizationInfo = markLibraryMethodsReturningReceiver();
+    this.codeRewriter = new CodeRewriter(appInfo, libraryClassesWithOptimizationInfo);
     this.lambdaRewriter = enableDesugaring ? new LambdaRewriter(this) : null;
     this.interfaceMethodRewriter =
         (enableDesugaring && enableInterfaceMethodDesugaring())
             ? new InterfaceMethodRewriter(this) : null;
-    lensCodeRewriter = null;
-    markLibraryMethodsReturningReceiver();
+    if (enableWholeProgramOptimizations) {
+      assert appInfo.withSubtyping() != null;
+      this.inliner = new Inliner(appInfo.withSubtyping(), graphLense, options);
+      this.outliner = new Outliner(appInfo, options);
+      this.memberValuePropagation = new MemberValuePropagation(appInfo);
+      this.lensCodeRewriter = new LensCodeRewriter(graphLense, appInfo.withSubtyping());
+    } else {
+      this.inliner = null;
+      this.outliner = null;
+      this.memberValuePropagation = null;
+      this.lensCodeRewriter = null;
+    }
   }
 
+  /**
+   * Create an IR converter for processing methods with full program optimization disabled.
+   */
   public IRConverter(
-      DexApplication application, AppInfo appInfo, InternalOptions options, CfgPrinter printer) {
-    this(application, appInfo, options, printer, true);
+      DexApplication application,
+      AppInfo appInfo,
+      InternalOptions options) {
+    this(null, application, appInfo, null, options, null, true, false);
   }
 
+  /**
+   * Create an IR converter for processing methods without full program optimization enabled.
+   *
+   * The argument <code>enableDesugaring</code> if desugaing is enabled.
+   */
+  public IRConverter(
+      DexApplication application,
+      AppInfo appInfo,
+      InternalOptions options,
+      boolean enableDesugaring) {
+    this(null, application, appInfo, null, options, null, enableDesugaring, false);
+  }
+
+  /**
+   * Create an IR converter for processing methods with full program optimization disabled.
+   */
+  public IRConverter(
+      Timing timing,
+      DexApplication application,
+      AppInfo appInfo,
+      InternalOptions options,
+      CfgPrinter printer) {
+    this(timing, application, appInfo, null, options, printer, true, false);
+  }
+
+  /**
+   * Create an IR converter for processing methods with full program optimization enabled.
+   */
   public IRConverter(
       Timing timing,
       DexApplication application,
@@ -105,21 +154,7 @@ public class IRConverter {
       InternalOptions options,
       CfgPrinter printer,
       GraphLense graphLense) {
-    this.timing = timing;
-    this.application = application;
-    this.appInfo = appInfo;
-    this.options = options;
-    this.printer = printer;
-    this.graphLense = graphLense;
-    this.codeRewriter = new CodeRewriter(appInfo);
-    this.outliner = new Outliner(appInfo, options);
-    this.memberValuePropagation = new MemberValuePropagation(appInfo);
-    this.inliner = new Inliner(appInfo, graphLense, options);
-    this.lambdaRewriter = new LambdaRewriter(this);
-    this.interfaceMethodRewriter = enableInterfaceMethodDesugaring()
-        ? new InterfaceMethodRewriter(this) : null;
-    lensCodeRewriter = new LensCodeRewriter(graphLense, appInfo);
-    markLibraryMethodsReturningReceiver();
+    this(timing, application, appInfo, graphLense, options, printer, true, true);
   }
 
   private boolean enableInterfaceMethodDesugaring() {
@@ -142,10 +177,11 @@ public class IRConverter {
     throw new Unreachable();
   }
 
-  private void markLibraryMethodsReturningReceiver() {
+  private Set<DexType> markLibraryMethodsReturningReceiver() {
     DexItemFactory dexItemFactory = appInfo.dexItemFactory;
-    dexItemFactory.stringBuilderMethods.forEeachAppendMethod(this::markReturnsReceiver);
-    dexItemFactory.stringBufferMethods.forEeachAppendMethod(this::markReturnsReceiver);
+    dexItemFactory.stringBuilderMethods.forEachAppendMethod(this::markReturnsReceiver);
+    dexItemFactory.stringBufferMethods.forEachAppendMethod(this::markReturnsReceiver);
+    return ImmutableSet.of(dexItemFactory.stringBuilderType, dexItemFactory.stringBufferType);
   }
 
   private void markReturnsReceiver(DexMethod method) {
@@ -175,10 +211,10 @@ public class IRConverter {
     }
   }
 
-  public DexApplication convertToDex() {
+  public DexApplication convertToDex(ExecutorService executor) throws ExecutionException {
     removeLambdaDeserializationMethods();
 
-    convertClassesToDex(application.classes());
+    convertClassesToDex(application.classes(), executor);
 
     // Build a new application with jumbo string info,
     Builder builder = new Builder(application);
@@ -190,11 +226,16 @@ public class IRConverter {
     return builder.build();
   }
 
-  private void convertClassesToDex(Iterable<DexProgramClass> classes) {
+  private void convertClassesToDex(Iterable<DexProgramClass> classes,
+      ExecutorService executor) throws ExecutionException {
+    List<Future<?>> futures = new ArrayList<>();
     for (DexProgramClass clazz : classes) {
-      convertMethodsToDex(clazz.directMethods());
-      convertMethodsToDex(clazz.virtualMethods());
+      futures.add(executor.submit(() -> {
+        convertMethodsToDex(clazz.directMethods());
+        convertMethodsToDex(clazz.virtualMethods());
+      }));
     }
+    ThreadUtils.awaitFutures(futures);
   }
 
   private void convertMethodsToDex(DexEncodedMethod[] methods) {
@@ -204,7 +245,7 @@ public class IRConverter {
         boolean matchesMethodFilter = options.methodMatchesFilter(method);
         if (matchesMethodFilter) {
           if (method.getCode().isJarCode()) {
-            rewriteCode(method, Outliner::noProcessing);
+            rewriteCode(method, ignoreOptimizationFeedback, Outliner::noProcessing);
           }
           updateHighestSortingStrings(method);
         }
@@ -236,34 +277,41 @@ public class IRConverter {
 
     // Process the application identifying outlining candidates.
     timing.begin("IR conversion phase 1");
+    int count = 0;
+    OptimizationFeedback directFeedback = new OptimizationFeedbackDirect();
+    OptimizationFeedbackDelayed delayedFeedback = new OptimizationFeedbackDelayed();
     while (!callGraph.isEmpty()) {
+      count++;
       CallGraph.Leaves leaves = callGraph.pickLeaves();
-      List<DexEncodedMethod> leafMethods = leaves.getLeaves();
-      assert leafMethods.size() > 0;
-      // If cycles where broken to produce leaves, don't do parallel processing to keep
-      // deterministic output.
-      // TODO(37133161): Most likely the failing:
-      //  java.com.android.tools.r8.internal.R8GMSCoreDeterministicTest
-      // is caused by processing in multiple threads.
-      if (true || leaves.brokeCycles()) {
-        for (DexEncodedMethod method : leafMethods) {
-          processMethod(method,
-              outliner == null ? Outliner::noProcessing : outliner::identifyCandidates);
-        }
-      } else {
-        List<Future<?>> futures = new ArrayList<>();
-        // For testing we have the option to randomize the processing order for the
-        // deterministic tests.
-        if (options.testing.randomizeCallGraphLeaves) {
-          Collections.shuffle(leafMethods, new Random(System.nanoTime()));
-        }
-        for (DexEncodedMethod method : leafMethods) {
+      List<DexEncodedMethod> methods = leaves.getLeaves();
+      assert methods.size() > 0;
+      List<Future<?>> futures = new ArrayList<>();
+
+      // For testing we have the option to determine the processing order of the methods.
+      if (options.testing.irOrdering != null) {
+        methods = options.testing.irOrdering.apply(methods, leaves);
+      }
+
+      while (methods.size() > 0) {
+        // Process the methods on multiple threads. If cycles where broken collect the
+        // optimization feedback to reprocess methods affected by it. This is required to get
+        // deterministic behaviour, as the processing order within each set of leaves is
+        // non-deterministic.
+        for (DexEncodedMethod method : methods) {
           futures.add(executorService.submit(() -> {
             processMethod(method,
+                leaves.brokeCycles() ? delayedFeedback : directFeedback,
                 outliner == null ? Outliner::noProcessing : outliner::identifyCandidates);
           }));
         }
         ThreadUtils.awaitFutures(futures);
+        if (leaves.brokeCycles()) {
+          // If cycles in the call graph were broken, then re-process all methods which are
+          // affected by the optimization feedback of other methods in this group.
+          methods = delayedFeedback.applyAndClear(methods, leaves);
+        } else {
+          methods = ImmutableList.of();
+        }
       }
     }
     timing.end();
@@ -276,8 +324,7 @@ public class IRConverter {
     if ((inliner != null) && (inliner.doubleInlineCallers.size() > 0)) {
       inliner.applyDoubleInlining = true;
       for (DexEncodedMethod method : inliner.doubleInlineCallers) {
-        method.markNotProcessed();
-        processMethod(method, Outliner::noProcessing);
+        processMethod(method, ignoreOptimizationFeedback, Outliner::noProcessing);
         assert method.isProcessed();
       }
     }
@@ -295,8 +342,7 @@ public class IRConverter {
         for (DexEncodedMethod method : outliner.getMethodsSelectedForOutlining()) {
           // This is the second time we compile this method first mark it not processed.
           assert !method.getCode().isOutlineCode();
-          method.markNotProcessed();
-          processMethod(method, outliner::applyOutliningCandidate);
+          processMethod(method, ignoreOptimizationFeedback, outliner::applyOutliningCandidate);
           assert method.isProcessed();
         }
         builder.addSynthesizedClass(outlineClass, true);
@@ -377,28 +423,28 @@ public class IRConverter {
 
   public void optimizeSynthesizedMethod(DexEncodedMethod method) {
     // Process the generated method, but don't apply any outlining.
-    processMethod(method, Outliner::noProcessing);
+    processMethod(method, ignoreOptimizationFeedback, Outliner::noProcessing);
   }
 
   private String logCode(InternalOptions options, DexEncodedMethod method) {
     return options.useSmaliSyntax ? method.toSmaliString(null) : method.codeToString();
   }
 
-  private void processMethod(
-      DexEncodedMethod method, BiConsumer<IRCode, DexEncodedMethod> outlineHandler) {
+  private void processMethod(DexEncodedMethod method,
+      OptimizationFeedback feedback,
+      BiConsumer<IRCode, DexEncodedMethod> outlineHandler) {
     Code code = method.getCode();
     boolean matchesMethodFilter = options.methodMatchesFilter(method);
     if (code != null && matchesMethodFilter) {
-      assert !method.isProcessed();
-      Constraint state = rewriteCode(method, outlineHandler);
-      method.markProcessed(state);
+      rewriteCode(method, feedback, outlineHandler);
     } else {
       // Mark abstract methods as processed as well.
       method.markProcessed(Constraint.NEVER);
     }
   }
 
-  private Constraint rewriteCode(DexEncodedMethod method,
+  private void rewriteCode(DexEncodedMethod method,
+      OptimizationFeedback feedback,
       BiConsumer<IRCode, DexEncodedMethod> outlineHandler) {
     if (options.verbose) {
       System.out.println("Processing: " + method.toSourceString());
@@ -409,7 +455,8 @@ public class IRConverter {
     }
     IRCode code = method.buildIR(options);
     if (code == null) {
-      return Constraint.NEVER;
+      feedback.markProcessed(method, Constraint.NEVER);
+      return;
     }
     if (Log.ENABLED) {
       Log.debug(getClass(), "Initial (SSA) flow graph for %s:\n%s", method.toSourceString(), code);
@@ -427,23 +474,30 @@ public class IRConverter {
       memberValuePropagation.rewriteWithConstantValues(code);
     }
     if (options.removeSwitchMaps) {
+      // TODO(zerny): Should we support removeSwitchMaps in debug mode? b/62936642
+      assert !options.debug;
       codeRewriter.removeSwitchMaps(code);
     }
+    if (options.disableAssertions) {
+      codeRewriter.disableAssertions(code);
+    }
     if (options.inlineAccessors && inliner != null) {
+      // TODO(zerny): Should we support inlining in debug mode? b/62937285
+      assert !options.debug;
       inliner.performInlining(method, code, callGraph);
     }
-    codeRewriter.rewriteLongCompareAndRequireNonNull(code, options.canUseObjectsNonNull());
+    codeRewriter.rewriteLongCompareAndRequireNonNull(code, options);
     codeRewriter.commonSubexpressionElimination(code);
     codeRewriter.simplifyArrayConstruction(code);
     codeRewriter.rewriteMoveResult(code);
     codeRewriter.splitConstants(code);
     codeRewriter.foldConstants(code);
+    codeRewriter.rewriteSwitch(code);
     codeRewriter.simplifyIf(code);
     if (Log.ENABLED) {
       Log.debug(getClass(), "Intermediate (SSA) flow graph for %s:\n%s",
           method.toSourceString(), code);
     }
-    codeRewriter.removeUnneededCatchHandlers(code);
     // Dead code removal. Performed after simplifications to remove code that becomes dead
     // as a result of those simplifications. The following optimizations could reveal more
     // dead code which is removed right before register allocation in performRegisterAllocation.
@@ -470,7 +524,7 @@ public class IRConverter {
     }
 
     codeRewriter.shortenLiveRanges(code);
-    codeRewriter.identifyReturnsArgument(method, code);
+    codeRewriter.identifyReturnsArgument(method, code, feedback);
 
     // Insert code to log arguments if requested.
     if (options.methodMatchesLogArgumentsFilter(method)) {
@@ -489,10 +543,13 @@ public class IRConverter {
     printMethod(code, "Final IR (non-SSA)");
 
     // After all the optimizations have take place, we compute whether method should be inlined.
+    Constraint state;
     if (!options.inlineAccessors || inliner == null) {
-      return Constraint.NEVER;
+      state = Constraint.NEVER;
+    } else {
+      state = inliner.identifySimpleMethods(code, method);
     }
-    return inliner.identifySimpleMethods(code, method);
+    feedback.markProcessed(method, state);
   }
 
   private void updateHighestSortingStrings(DexEncodedMethod method) {
@@ -547,7 +604,7 @@ public class IRConverter {
     // Always perform dead code elimination before register allocation. The register allocator
     // does not allow dead code (to make sure that we do not waste registers for unneeded values).
     DeadCodeRemover.removeDeadCode(code, codeRewriter, options);
-    LinearScanRegisterAllocator registerAllocator = new LinearScanRegisterAllocator(code);
+    LinearScanRegisterAllocator registerAllocator = new LinearScanRegisterAllocator(code, options);
     registerAllocator.allocateRegisters(options.debug);
     printMethod(code, "After register allocation (non-SSA)");
     printLiveRanges(registerAllocator, "Final live ranges.");

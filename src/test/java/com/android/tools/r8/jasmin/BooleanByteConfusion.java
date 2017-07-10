@@ -3,20 +3,19 @@
 // BSD-style license that can be found in the LICENSE file.
 package com.android.tools.r8.jasmin;
 
-import static junit.framework.TestCase.assertEquals;
+import static org.junit.Assert.assertEquals;
 
 import com.google.common.collect.ImmutableList;
 import org.junit.Test;
 
 public class BooleanByteConfusion extends JasminTestBase {
 
-  private void runTest(JasminBuilder builder, String main, String expected) throws Exception {
+  private void runTest(JasminBuilder builder, String main) throws Exception {
     String javaResult = runOnJava(builder, main);
-    assertEquals(expected, javaResult);
     String artResult = runOnArt(builder, main);
-    assertEquals(expected, artResult);
+    assertEquals(javaResult, artResult);
     String dxArtResult = runOnArtDx(builder, main);
-    assertEquals(expected, dxArtResult);
+    assertEquals(javaResult, dxArtResult);
   }
 
   @Test
@@ -108,6 +107,6 @@ public class BooleanByteConfusion extends JasminTestBase {
         "  invokestatic Test/foo(Z)V",
         "  return");
 
-    runTest(builder, clazz.name, "true\nfalse\nnull array\n");
+    runTest(builder, clazz.name);
   }
 }

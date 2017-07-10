@@ -54,6 +54,7 @@ import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.ShortBuffer;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -72,10 +73,16 @@ public class DexFileReader {
   private final ClassKind classKind;
 
   public static Segment[] parseMapFrom(Path file) throws IOException {
-    DexFileReader reader =
-        new DexFileReader(
-            new DexFile(file.toString()), ClassKind.PROGRAM, new DexItemFactory());
-    return reader.parseMap();
+    return parseMapFrom(new DexFile(file.toString()));
+  }
+
+  public static Segment[] parseMapFrom(InputStream stream) throws IOException {
+    return parseMapFrom(new DexFile(stream));
+  }
+
+  private static Segment[] parseMapFrom(DexFile dex) throws IOException {
+    DexFileReader reader = new DexFileReader(dex, ClassKind.PROGRAM, new DexItemFactory());
+    return reader.segments;
   }
 
   public void close() {
@@ -118,11 +125,11 @@ public class DexFileReader {
       return;
     }
     Segment segment = lookupSegment(Constants.TYPE_CODE_ITEM);
-    if (segment.size == 0) {
+    if (segment.length == 0) {
       return;
     }
     file.position(segment.offset);
-    for (int i = 0; i < segment.size; i++) {
+    for (int i = 0; i < segment.length; i++) {
       file.align(4);  // code items are 4 byte aligned.
       int offset = file.position();
       DexCode code = parseCodeItem();
@@ -583,23 +590,23 @@ public class DexFileReader {
 
   void addClassDefsTo(Consumer<DexClass> classCollection) {
     final Segment segment = lookupSegment(Constants.TYPE_CLASS_DEF_ITEM);
-    final int size = segment.size;
-    indexedItems.initializeClasses(size);
-    if (size == 0) {
+    final int length = segment.length;
+    indexedItems.initializeClasses(length);
+    if (length == 0) {
       return;
     }
     file.position(segment.offset);
 
-    int[] classIndices = new int[size];
-    int[] accessFlags = new int[size];
-    int[] superclassIndices = new int[size];
-    int[] interfacesOffsets = new int[size];
-    int[] sourceFileIndices = new int[size];
-    int[] annotationsOffsets = new int[size];
-    int[] classDataOffsets = new int[size];
-    int[] staticValuesOffsets = new int[size];
+    int[] classIndices = new int[length];
+    int[] accessFlags = new int[length];
+    int[] superclassIndices = new int[length];
+    int[] interfacesOffsets = new int[length];
+    int[] sourceFileIndices = new int[length];
+    int[] annotationsOffsets = new int[length];
+    int[] classDataOffsets = new int[length];
+    int[] staticValuesOffsets = new int[length];
 
-    for (int i = 0; i < size; i++) {
+    for (int i = 0; i < length; i++) {
       if (Log.ENABLED) {
         Log.verbose(getClass(), "Reading ClassDef @ 0x%08x.", file.position());
       }
@@ -613,7 +620,7 @@ public class DexFileReader {
       staticValuesOffsets[i] = file.getUint();
     }
 
-    for (int i = 0; i < size; i++) {
+    for (int i = 0; i < length; i++) {
       int superclassIdx = superclassIndices[i];
       DexType superclass = superclassIdx == NO_INDEX ? null : indexedItems.getType(superclassIdx);
       int srcIdx = sourceFileIndices[i];
@@ -670,12 +677,12 @@ public class DexFileReader {
 
   private void parseStringIDs() {
     Segment segment = lookupSegment(Constants.TYPE_STRING_ID_ITEM);
-    stringIDs = new int[segment.size];
-    if (segment.size == 0) {
+    stringIDs = new int[segment.length];
+    if (segment.length == 0) {
       return;
     }
     file.position(segment.offset);
-    for (int i = 0; i < segment.size; i++) {
+    for (int i = 0; i < segment.length; i++) {
       stringIDs[i] = file.getUint();
     }
   }
@@ -708,7 +715,7 @@ public class DexFileReader {
         Segment segment = result[i];
         int nextOffset = i < result.length - 1 ? result[i + 1].offset : segment.offset;
         Log.debug(this.getClass(), "Read segment 0x%04x @ 0x%08x #items %08d size 0x%08x.",
-            segment.type, segment.offset, segment.size, nextOffset - segment.offset);
+            segment.type, segment.offset, segment.length, nextOffset - segment.offset);
       }
     }
     for (int i = 0; i < mapSize - 1; i++) {
@@ -816,48 +823,48 @@ public class DexFileReader {
 
   private static void populateMethodHandles(DexFileReader reader) {
     Segment segment = reader.lookupSegment(Constants.TYPE_METHOD_HANDLE_ITEM);
-    reader.indexedItems.initializeMethodHandles(segment.size);
-    for (int i = 0; i < segment.size; i++) {
+    reader.indexedItems.initializeMethodHandles(segment.length);
+    for (int i = 0; i < segment.length; i++) {
       reader.indexedItems.setMethodHandle(i, reader.methodHandleAt(i));
     }
   }
 
   private static void populateCallSites(DexFileReader reader) {
     Segment segment = reader.lookupSegment(Constants.TYPE_CALL_SITE_ID_ITEM);
-    reader.indexedItems.initializeCallSites(segment.size);
-    for (int i = 0; i < segment.size; i++) {
+    reader.indexedItems.initializeCallSites(segment.length);
+    for (int i = 0; i < segment.length; i++) {
       reader.indexedItems.setCallSites(i, reader.callSiteAt(i));
     }
   }
 
   private static void populateTypes(DexFileReader reader) {
     Segment segment = reader.lookupSegment(Constants.TYPE_TYPE_ID_ITEM);
-    reader.indexedItems.initializeTypes(segment.size);
-    for (int i = 0; i < segment.size; i++) {
+    reader.indexedItems.initializeTypes(segment.length);
+    for (int i = 0; i < segment.length; i++) {
       reader.indexedItems.setType(i, reader.typeAt(i));
     }
   }
 
   private static void populateFields(DexFileReader reader) {
     Segment segment = reader.lookupSegment(Constants.TYPE_FIELD_ID_ITEM);
-    reader.indexedItems.initializeFields(segment.size);
-    for (int i = 0; i < segment.size; i++) {
+    reader.indexedItems.initializeFields(segment.length);
+    for (int i = 0; i < segment.length; i++) {
       reader.indexedItems.setField(i, reader.fieldAt(i));
     }
   }
 
   private static void populateProtos(DexFileReader reader) {
     Segment segment = reader.lookupSegment(Constants.TYPE_PROTO_ID_ITEM);
-    reader.indexedItems.initializeProtos(segment.size);
-    for (int i = 0; i < segment.size; i++) {
+    reader.indexedItems.initializeProtos(segment.length);
+    for (int i = 0; i < segment.length; i++) {
       reader.indexedItems.setProto(i, reader.protoAt(i));
     }
   }
 
   private static void populateMethods(DexFileReader reader) {
     Segment segment = reader.lookupSegment(Constants.TYPE_METHOD_ID_ITEM);
-    reader.indexedItems.initializeMethods(segment.size);
-    for (int i = 0; i < segment.size; i++) {
+    reader.indexedItems.initializeMethods(segment.length);
+    for (int i = 0; i < segment.length; i++) {
       reader.indexedItems.setMethod(i, reader.methodAt(i));
     }
   }
@@ -877,7 +884,7 @@ public class DexFileReader {
 
   private DexType typeAt(int index) {
     Segment segment = lookupSegment(Constants.TYPE_TYPE_ID_ITEM);
-    if (index >= segment.size) {
+    if (index >= segment.length) {
       return null;
     }
     int offset = segment.offset + (Constants.TYPE_TYPE_ID_ITEM_SIZE * index);
@@ -887,7 +894,7 @@ public class DexFileReader {
 
   private DexField fieldAt(int index) {
     Segment segment = lookupSegment(Constants.TYPE_FIELD_ID_ITEM);
-    if (index >= segment.size) {
+    if (index >= segment.length) {
       return null;
     }
     int offset = segment.offset + (Constants.TYPE_FIELD_ID_ITEM_SIZE * index);
@@ -903,7 +910,7 @@ public class DexFileReader {
 
   private DexMethodHandle methodHandleAt(int index) {
     Segment segment = lookupSegment(Constants.TYPE_METHOD_HANDLE_ITEM);
-    if (index >= segment.size) {
+    if (index >= segment.length) {
       return null;
     }
     int offset = segment.offset + (Constants.TYPE_METHOD_HANDLE_ITEM_SIZE * index);
@@ -935,7 +942,7 @@ public class DexFileReader {
 
   private DexCallSite callSiteAt(int index) {
     Segment segment = lookupSegment(Constants.TYPE_CALL_SITE_ID_ITEM);
-    if (index >= segment.size) {
+    if (index >= segment.length) {
       return null;
     }
     int callSiteOffset =
@@ -956,7 +963,7 @@ public class DexFileReader {
 
   private DexProto protoAt(int index) {
     Segment segment = lookupSegment(Constants.TYPE_PROTO_ID_ITEM);
-    if (index >= segment.size) {
+    if (index >= segment.length) {
       return null;
     }
     int offset = segment.offset + (Constants.TYPE_PROTO_ID_ITEM_SIZE * index);
@@ -972,7 +979,7 @@ public class DexFileReader {
 
   private DexMethod methodAt(int index) {
     Segment segment = lookupSegment(Constants.TYPE_METHOD_ID_ITEM);
-    if (index >= segment.size) {
+    if (index >= segment.length) {
       return null;
     }
     int offset = segment.offset + (Constants.TYPE_METHOD_ID_ITEM_SIZE * index);

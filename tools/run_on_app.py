@@ -5,14 +5,15 @@
 
 import optparse
 import os
-import r8
-import d8
 import sys
-import utils
+import time
 
-import gmscore_data
-import youtube_data
+import d8
 import gmail_data
+import gmscore_data
+import r8
+import utils
+import youtube_data
 
 TYPES = ['dex', 'deploy', 'proguarded']
 APPS = ['gmscore', 'youtube', 'gmail']
@@ -67,6 +68,11 @@ def ParseOptions():
                     help='Dump a file with the arguments for the specified ' +
                     'configuration. For use as a @<file> argument to perform ' +
                     'the run.')
+  result.add_option('--print-runtimeraw',
+                    metavar='BENCHMARKNAME',
+                    help='Prints the line \'<BENCHMARKNAME>(RunTimeRaw):' +
+                         ' <elapsed> ms\' at the end where <elapsed> is' +
+                         ' the elapsed time in milliseconds.')
   return result.parse_args()
 
 # Most apps have the -printmapping and -printseeds in the Proguard
@@ -81,6 +87,7 @@ def GenerateAdditionalProguardConfiguration(temp, outdir):
     return os.path.abspath(file.name)
 
 def main():
+  app_provided_pg_conf = False;
   (options, args) = ParseOptions()
   outdir = options.out
   data = None
@@ -118,6 +125,8 @@ def main():
     inputs = values['inputs']
 
   args.extend(['--output', outdir])
+  if 'min-api' in values:
+    args.extend(['--min-api', values['min-api']])
 
   if options.compiler == 'r8':
     if 'pgmap' in values:
@@ -125,8 +134,12 @@ def main():
     if 'pgconf' in values and not options.k:
       for pgconf in values['pgconf']:
         args.extend(['--pg-conf', pgconf])
+        app_provided_pg_conf = True
     if options.k:
       args.extend(['--pg-conf', options.k])
+    if 'multidexrules' in values:
+      for rules in values['multidexrules']:
+        args.extend(['--multidex-rules', rules])
 
   if not options.no_libraries and 'libraries' in values:
     for lib in values['libraries']:
@@ -147,6 +160,8 @@ def main():
   if inputs:
     args.extend(inputs)
 
+  t0 = time.time()
+
   if options.dump_args_file:
     with open(options.dump_args_file, 'w') as args_file:
       args_file.writelines([arg + os.linesep for arg in args])
@@ -156,15 +171,22 @@ def main():
              options.track_memory_to_file)
     else:
       with utils.TempDir() as temp:
-        if outdir.endswith('.zip') or outdir.endswith('.jar'):
-          pg_outdir = os.path.dirname(outdir)
-        else:
-          pg_outdir = outdir
-        additional_pg_conf = GenerateAdditionalProguardConfiguration(
-            temp, os.path.abspath(pg_outdir))
-        args.extend(['--pg-conf', additional_pg_conf])
+        if app_provided_pg_conf:
+          # Ensure that output of -printmapping and -printseeds go to the output
+          # location and not where the app Proguard configuration places them.
+          if outdir.endswith('.zip') or outdir.endswith('.jar'):
+            pg_outdir = os.path.dirname(outdir)
+          else:
+            pg_outdir = outdir
+          additional_pg_conf = GenerateAdditionalProguardConfiguration(
+              temp, os.path.abspath(pg_outdir))
+          args.extend(['--pg-conf', additional_pg_conf])
         r8.run(args, not options.no_build, not options.no_debug, options.profile,
                options.track_memory_to_file)
+
+  if options.print_runtimeraw:
+    print('{}(RunTimeRaw): {} ms'
+        .format(options.print_runtimeraw, 1000.0 * (time.time() - t0)))
 
 if __name__ == '__main__':
   sys.exit(main())
