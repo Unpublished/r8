@@ -108,7 +108,7 @@ public class AndroidApp {
    * Create an app from program files @code{files}. See also Builder::addProgramFiles.
    */
   public static AndroidApp fromProgramFiles(List<Path> files) throws IOException {
-    return builder().addProgramFiles(files).build();
+    return builder().addProgramFiles(files, false).build();
   }
 
   /**
@@ -408,7 +408,7 @@ public class AndroidApp {
     public Builder addProgramDirectory(Path directory) throws IOException {
       File[] resources = directory.toFile().listFiles(file -> isDexFile(file.toPath()));
       for (File source : resources) {
-        addFile(source.toPath(), ClassKind.PROGRAM);
+        addFile(source.toPath(), ClassKind.PROGRAM, false);
       }
       File mapFile = new File(directory.toFile(), DEFAULT_PROGUARD_MAP_FILE);
       if (mapFile.exists()) {
@@ -421,15 +421,15 @@ public class AndroidApp {
      * Add program file resources.
      */
     public Builder addProgramFiles(Path... files) throws IOException {
-      return addProgramFiles(Arrays.asList(files));
+      return addProgramFiles(Arrays.asList(files), false);
     }
 
     /**
      * Add program file resources.
      */
-    public Builder addProgramFiles(Collection<Path> files) throws IOException {
+    public Builder addProgramFiles(Collection<Path> files, boolean skipDex) throws IOException {
       for (Path file : files) {
-        addFile(file, ClassKind.PROGRAM);
+        addFile(file, ClassKind.PROGRAM, skipDex);
       }
       return this;
     }
@@ -446,7 +446,7 @@ public class AndroidApp {
      */
     public Builder addClasspathFiles(Collection<Path> files) throws IOException {
       for (Path file : files) {
-        addFile(file, ClassKind.CLASSPATH);
+        addFile(file, ClassKind.CLASSPATH, false);
       }
       return this;
     }
@@ -471,7 +471,7 @@ public class AndroidApp {
      */
     public Builder addLibraryFiles(Collection<Path> files) throws IOException {
       for (Path file : files) {
-        addFile(file, ClassKind.LIBRARY);
+        addFile(file, ClassKind.LIBRARY, false);
       }
       return this;
     }
@@ -610,22 +610,22 @@ public class AndroidApp {
       throw new Unreachable();
     }
 
-    private void addFile(Path file, ClassKind classKind) throws IOException {
+    private void addFile(Path file, ClassKind classKind, boolean skipDex) throws IOException {
       if (!Files.exists(file)) {
         throw new FileNotFoundException("Non-existent input file: " + file);
       }
-      if (isDexFile(file)) {
+      if (isDexFile(file) && !skipDex) {
         resources(classKind).add(Resource.fromFile(Resource.Kind.DEX, file));
       } else if (isClassFile(file)) {
         resources(classKind).add(Resource.fromFile(Resource.Kind.CLASSFILE, file));
       } else if (isArchive(file)) {
-        addArchive(file, classKind);
+        addArchive(file, classKind, skipDex);
       } else {
         throw new CompilationError("Unsupported source file type for file: " + file);
       }
     }
 
-    private void addArchive(Path archive, ClassKind classKind) throws IOException {
+    private void addArchive(Path archive, ClassKind classKind, boolean skipDex) throws IOException {
       assert isArchive(archive);
       boolean containsDexData = false;
       boolean containsClassData = false;
@@ -633,7 +633,7 @@ public class AndroidApp {
         ZipEntry entry;
         while ((entry = stream.getNextEntry()) != null) {
           Path name = Paths.get(entry.getName());
-          if (isDexFile(name)) {
+          if (isDexFile(name) && !skipDex) {
             containsDexData = true;
             resources(classKind).add(Resource.fromBytes(
                 Resource.Kind.DEX, ByteStreams.toByteArray(stream)));
