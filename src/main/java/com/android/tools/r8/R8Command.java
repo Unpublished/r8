@@ -161,7 +161,7 @@ public class R8Command extends BaseCommand {
           throw new CompilationException(e.getMessage(), e.getCause());
         }
         configuration = parser.getConfig();
-        addProgramFiles(configuration.getInjars());
+        addProgramFiles(configuration.getInjars(), false);
         addLibraryFiles(configuration.getLibraryjars());
       }
 
