@@ -15,6 +15,7 @@ import com.google.common.collect.ImmutableSet;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.function.BiFunction;
+import java.util.function.Function;
 
 public class InternalOptions {
 
@@ -140,8 +141,7 @@ public class InternalOptions {
   }
 
   public static class TestingOptions {
-
-    public BiFunction<List<DexEncodedMethod>, CallGraph.Leaves, List<DexEncodedMethod>> irOrdering;
+    public Function<List<DexEncodedMethod>, List<DexEncodedMethod>> irOrdering;
   }
 
   public static class AttributeRemovalOptions {
@@ -251,15 +251,18 @@ public class InternalOptions {
 
     public void ensureValid(boolean isMinifying) {
       if (innerClasses && !enclosingMethod) {
-        throw new CompilationError("Attribute InnerClasses implies EnclosingMethod attribute. " +
-            "Check -keepattributes directive.");
+        throw new CompilationError("Attribute InnerClasses requires EnclosingMethod attribute. "
+            + "Check -keepattributes directive.");
       } else if (!innerClasses && enclosingMethod) {
-        throw new CompilationError("Attribute EnclosingMethod requires InnerClasses attribute. " +
-            "Check -keepattributes directive.");
+        throw new CompilationError("Attribute EnclosingMethod requires InnerClasses attribute. "
+            + "Check -keepattributes directive.");
+      } else if (signature && !innerClasses) {
+        throw new CompilationError("Attribute Signature requires InnerClasses attribute. Check "
+            + "-keepattributes directive.");
       } else if (signature && isMinifying) {
         // TODO(38188583): Allow this once we can minify signatures.
-        throw new CompilationError("Attribute Signature cannot be kept when minifying. " +
-            "Check -keepattributes directive.");
+        throw new CompilationError("Attribute Signature cannot be kept when minifying. "
+            + "Check -keepattributes directive.");
       }
     }
   }
