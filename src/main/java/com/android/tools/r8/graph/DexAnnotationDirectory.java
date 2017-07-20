@@ -48,10 +48,6 @@ public class DexAnnotationDirectory extends DexItem {
     }
   }
 
-  public DexProgramClass getDexProgramClass() {
-    return clazz;
-  }
-
   public DexAnnotationSet getClazzAnnotations() {
     return clazz.annotations;
   }
@@ -81,16 +77,19 @@ public class DexAnnotationDirectory extends DexItem {
     if (!(obj instanceof DexAnnotationDirectory)) {
       return false;
     }
-    if (clazz.hasInternalizableAnnotation()) {
-      return clazz.annotations
-          .equals(((DexAnnotationDirectory) obj).clazz.annotations);
+    if (clazz.hasOnlyInternalizableAnnotations()) {
+      DexAnnotationDirectory other = (DexAnnotationDirectory) obj;
+      if (!other.clazz.hasOnlyInternalizableAnnotations()) {
+        return false;
+      }
+      return clazz.annotations.equals(other.clazz.annotations);
     }
     return super.equals(obj);
   }
 
   @Override
   public final int hashCode() {
-    if (clazz.hasInternalizableAnnotation()) {
+    if (clazz.hasOnlyInternalizableAnnotations()) {
       return clazz.annotations.hashCode();
     }
     return super.hashCode();
