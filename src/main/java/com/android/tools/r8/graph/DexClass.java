@@ -11,6 +11,7 @@ import com.android.tools.r8.errors.Unreachable;
 import com.google.common.base.MoreObjects;
 
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.function.Consumer;
 
 public abstract class DexClass extends DexItem {
@@ -95,6 +96,15 @@ public abstract class DexClass extends DexItem {
     return result;
   }
 
+  public void forEachField(Consumer<DexEncodedField> consumer) {
+    for (DexEncodedField field : staticFields()) {
+      consumer.accept(field);
+    }
+    for (DexEncodedField field : instanceFields()) {
+      consumer.accept(field);
+    }
+  }
+
   public DexEncodedField[] staticFields() {
     return MoreObjects.firstNonNull(staticFields, NO_FIELDS);
   }
@@ -157,10 +167,6 @@ public abstract class DexClass extends DexItem {
 
   public boolean isClasspathClass() {
     return false;
-  }
-
-  public DexClasspathClass asClasspathClass() {
-    return null;
   }
 
   public boolean isLibraryClass() {
