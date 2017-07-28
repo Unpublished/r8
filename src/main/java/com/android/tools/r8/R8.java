@@ -37,8 +37,8 @@ import com.android.tools.r8.shaking.SimpleClassMerger;
 import com.android.tools.r8.shaking.TreePruner;
 import com.android.tools.r8.utils.AndroidApp;
 import com.android.tools.r8.utils.CfgPrinter;
+import com.android.tools.r8.utils.FileUtils;
 import com.android.tools.r8.utils.InternalOptions;
-import com.android.tools.r8.utils.InternalOptions.AttributeRemovalOptions;
 import com.android.tools.r8.utils.PackageDistribution;
 import com.android.tools.r8.utils.ThreadUtils;
 import com.android.tools.r8.utils.Timing;
@@ -75,13 +75,15 @@ public class R8 {
       ExecutorService executorService,
       DexApplication application,
       AppInfo appInfo,
+      byte[] deadCode,
       NamingLens namingLens,
       byte[] proguardSeedsData,
       PackageDistribution packageDistribution,
       InternalOptions options)
       throws ExecutionException {
     try {
-      return new ApplicationWriter(application, appInfo, options, namingLens, proguardSeedsData)
+      return new ApplicationWriter(
+          application, appInfo, options, deadCode, namingLens, proguardSeedsData)
           .write(packageDistribution, executorService);
     } catch (IOException e) {
       throw new RuntimeException("Cannot write dex application", e);
@@ -181,7 +183,7 @@ public class R8 {
     }
   }
 
-  static CompilationResult runForTesting(
+  private static CompilationResult runForTesting(
       AndroidApp app,
       InternalOptions options,
       ExecutorService executor)
@@ -237,10 +239,6 @@ public class R8 {
           appInfo = appInfo.withLiveness().prunedCopyFrom(application);
           new AbstractMethodRemover(appInfo).run();
           new AnnotationRemover(appInfo.withLiveness(), options).run();
-        } else if (!options.skipMinification) {
-          // TODO(38188583): Ensure signatures are removed when minifying.
-          new AnnotationRemover(appInfo.withLiveness(), true,
-              AttributeRemovalOptions.filterOnlySignatures());
         }
       } finally {
         timing.end();
@@ -342,6 +340,7 @@ public class R8 {
               executorService,
               application,
               appInfo,
+              application.deadCode,
               namingLens,
               proguardSeedsData,
               packageDistribution,
@@ -391,42 +390,46 @@ public class R8 {
     if (options.printMapping && !options.skipMinification) {
       assert outputApp.hasProguardMap();
       try (Closer closer = Closer.create()) {
-        OutputStream mapOut = openPathWithDefault(
+        OutputStream mapOut = FileUtils.openPathWithDefault(
             closer,
             options.printMappingFile,
-            System.out);
+            System.out,
+            StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
         outputApp.writeProguardMap(closer, mapOut);
       }
     }
     if (options.printSeeds) {
       assert outputApp.hasProguardSeeds();
       try (Closer closer = Closer.create()) {
-        OutputStream seedsOut = openPathWithDefault(closer, options.seedsFile, System.out);
+        OutputStream seedsOut = FileUtils.openPathWithDefault(
+            closer,
+            options.seedsFile,
+            System.out,
+            StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
         outputApp.writeProguardSeeds(closer, seedsOut);
       }
     }
     if (options.printMainDexList && outputApp.hasMainDexList()) {
       try (Closer closer = Closer.create()) {
         OutputStream mainDexOut =
-            openPathWithDefault(closer, options.printMainDexListFile, System.out);
+            FileUtils.openPathWithDefault(
+                closer,
+                options.printMainDexListFile,
+                System.out,
+                StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
         outputApp.writeMainDexList(closer, mainDexOut);
       }
     }
-  }
-
-  private static OutputStream openPathWithDefault(Closer closer,
-      Path file,
-      PrintStream defaultOutput) throws IOException {
-    OutputStream mapOut;
-    if (file == null) {
-      mapOut = defaultOutput;
-    } else {
-      mapOut =
-          Files.newOutputStream(
-              file, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-      closer.register(mapOut);
+    if (options.printUsage && outputApp.hasDeadCode()) {
+      try (Closer closer = Closer.create()) {
+        OutputStream deadCodeOut = FileUtils.openPathWithDefault(
+            closer,
+            options.printUsageFile,
+            System.out,
+            StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        outputApp.writeDeadCode(closer, deadCodeOut);
+      }
     }
-    return mapOut;
   }
 
   /**

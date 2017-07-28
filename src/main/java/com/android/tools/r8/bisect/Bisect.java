@@ -9,7 +9,6 @@ import com.android.tools.r8.dex.ApplicationWriter;
 import com.android.tools.r8.errors.CompilationError;
 import com.android.tools.r8.graph.AppInfo;
 import com.android.tools.r8.graph.DexApplication;
-import com.android.tools.r8.graph.DexItemFactory;
 import com.android.tools.r8.graph.DexProgramClass;
 import com.android.tools.r8.utils.AndroidApp;
 import com.android.tools.r8.utils.InternalOptions;
@@ -31,7 +30,6 @@ import java.util.concurrent.Executors;
 public class Bisect {
 
   private final BisectOptions options;
-  private final DexItemFactory factory = new DexItemFactory();
   private final Timing timing = new Timing("bisect");
 
   public interface Command {
@@ -179,7 +177,7 @@ public class Bisect {
       throws IOException, ExecutionException {
     InternalOptions options = new InternalOptions();
     AppInfo appInfo = new AppInfo(app);
-    ApplicationWriter writer = new ApplicationWriter(app, appInfo, options, null, null);
+    ApplicationWriter writer = new ApplicationWriter(app, appInfo, options, null, null, null);
     AndroidApp outApp = writer.write(null, executor);
     outApp.writeToDirectory(output, OutputMode.Indexed);
   }
