@@ -617,7 +617,7 @@ public class AndroidApp {
       } else if (isClassFile(file)) {
         programResources.add(Resource.fromFile(Resource.Kind.CLASSFILE, file));
       } else if (isArchive(file)) {
-        addProgramArchive(file);
+        addProgramArchive(file, skipDex);
       } else {
         throw new CompilationError("Unsupported source file type for file: " + file);
       }
@@ -638,6 +638,10 @@ public class AndroidApp {
     }
 
     private void addProgramArchive(Path archive) throws IOException {
+      addProgramArchive(archive, false);
+    }
+
+    private void addProgramArchive(Path archive, boolean skipDex) throws IOException {
       assert isArchive(archive);
       boolean containsDexData = false;
       boolean containsClassData = false;
@@ -645,7 +649,7 @@ public class AndroidApp {
         ZipEntry entry;
         while ((entry = stream.getNextEntry()) != null) {
           Path name = Paths.get(entry.getName());
-          if (isDexFile(name)) {
+          if (isDexFile(name) && !skipDex) {
             containsDexData = true;
             programResources.add(Resource.fromBytes(
                 Resource.Kind.DEX, ByteStreams.toByteArray(stream)));
