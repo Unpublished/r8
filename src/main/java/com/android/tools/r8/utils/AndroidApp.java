@@ -10,8 +10,6 @@ import static com.android.tools.r8.utils.FileUtils.isDexFile;
 import com.android.tools.r8.ClassFileResourceProvider;
 import com.android.tools.r8.Resource;
 import com.android.tools.r8.errors.CompilationError;
-import com.android.tools.r8.errors.Unreachable;
-import com.android.tools.r8.graph.ClassKind;
 import com.google.common.collect.ImmutableList;
 import com.google.common.io.ByteStreams;
 import com.google.common.io.Closer;
@@ -52,10 +50,9 @@ public class AndroidApp {
   public static final String DEFAULT_PROGUARD_MAP_FILE = "proguard.map";
 
   private final ImmutableList<Resource> programResources;
-  private final ImmutableList<Resource> classpathResources;
-  private final ImmutableList<Resource> libraryResources;
   private final ImmutableList<ClassFileResourceProvider> classpathResourceProviders;
   private final ImmutableList<ClassFileResourceProvider> libraryResourceProviders;
+  private final Resource deadCode;
   private final Resource proguardMap;
   private final Resource proguardSeeds;
   private final Resource packageDistribution;
@@ -64,19 +61,17 @@ public class AndroidApp {
   // See factory methods and AndroidApp.Builder below.
   private AndroidApp(
       ImmutableList<Resource> programResources,
-      ImmutableList<Resource> classpathResources,
-      ImmutableList<Resource> libraryResources,
       ImmutableList<ClassFileResourceProvider> classpathResourceProviders,
       ImmutableList<ClassFileResourceProvider> libraryResourceProviders,
+      Resource deadCode,
       Resource proguardMap,
       Resource proguardSeeds,
       Resource packageDistribution,
       Resource mainDexList) {
     this.programResources = programResources;
-    this.classpathResources = classpathResources;
-    this.libraryResources = libraryResources;
     this.classpathResourceProviders = classpathResourceProviders;
     this.libraryResourceProviders = libraryResourceProviders;
+    this.deadCode = deadCode;
     this.proguardMap = proguardMap;
     this.proguardSeeds = proguardSeeds;
     this.packageDistribution = packageDistribution;
@@ -108,7 +103,7 @@ public class AndroidApp {
    * Create an app from program files @code{files}. See also Builder::addProgramFiles.
    */
   public static AndroidApp fromProgramFiles(List<Path> files) throws IOException {
-    return builder().addProgramFiles(files, false).build();
+    return builder().addProgramFiles(files).build();
   }
 
   /**
@@ -156,26 +151,6 @@ public class AndroidApp {
     return filter(programResources, Resource.Kind.CLASSFILE);
   }
 
-  /** Get input streams for all dex program classpath resources. */
-  public List<Resource> getDexClasspathResources() {
-    return filter(classpathResources, Resource.Kind.DEX);
-  }
-
-  /** Get input streams for all Java-bytecode classpath resources. */
-  public List<Resource> getClassClasspathResources() {
-    return filter(classpathResources, Resource.Kind.CLASSFILE);
-  }
-
-  /** Get input streams for all dex library resources. */
-  public List<Resource> getDexLibraryResources() {
-    return filter(libraryResources, Resource.Kind.DEX);
-  }
-
-  /** Get input streams for all Java-bytecode library resources. */
-  public List<Resource> getClassLibraryResources() {
-    return filter(libraryResources, Resource.Kind.CLASSFILE);
-  }
-
   /** Get classpath resource providers. */
   public List<ClassFileResourceProvider> getClasspathResourceProviders() {
     return classpathResourceProviders;
@@ -194,6 +169,20 @@ public class AndroidApp {
       }
     }
     return out;
+  }
+
+  /**
+   * True if the dead-code resource exists.
+   */
+  public boolean hasDeadCode() {
+    return deadCode != null;
+  }
+
+  /**
+   * Get the input stream of the dead-code resource if exists.
+   */
+  public InputStream getDeadCode(Closer closer) throws IOException {
+    return deadCode == null ? null : deadCode.getStream(closer);
   }
 
   /**
@@ -365,16 +354,21 @@ public class AndroidApp {
     out.write(ByteStreams.toByteArray(input));
   }
 
+  public void writeDeadCode(Closer closer, OutputStream out) throws IOException {
+    InputStream input = getDeadCode(closer);
+    assert input != null;
+    out.write(ByteStreams.toByteArray(input));
+  }
+
   /**
    * Builder interface for constructing an AndroidApp.
    */
   public static class Builder {
 
     private final List<Resource> programResources = new ArrayList<>();
-    private final List<Resource> classpathResources = new ArrayList<>();
-    private final List<Resource> libraryResources = new ArrayList<>();
     private final List<ClassFileResourceProvider> classpathResourceProviders = new ArrayList<>();
     private final List<ClassFileResourceProvider> libraryResourceProviders = new ArrayList<>();
+    private Resource deadCode;
     private Resource proguardMap;
     private Resource proguardSeeds;
     private Resource packageDistribution;
@@ -387,10 +381,9 @@ public class AndroidApp {
     // See AndroidApp::builder(AndroidApp).
     private Builder(AndroidApp app) {
       programResources.addAll(app.programResources);
-      classpathResources.addAll(app.classpathResources);
-      libraryResources.addAll(app.libraryResources);
       classpathResourceProviders.addAll(app.classpathResourceProviders);
       libraryResourceProviders.addAll(app.libraryResourceProviders);
+      deadCode = app.deadCode;
       proguardMap = app.proguardMap;
       proguardSeeds = app.proguardSeeds;
       packageDistribution = app.packageDistribution;
@@ -409,10 +402,10 @@ public class AndroidApp {
      * @param directory Directory containing dex program files and optional proguard-map file.
      */
     public Builder addProgramDirectory(Path directory) throws IOException {
-      File[] resources = directory.toFile().listFiles(file -> isDexFile(file.toPath()));
-      for (File source : resources) {
-        addFile(source.toPath(), ClassKind.PROGRAM, false);
-      }
+      List<Path> resources =
+          Arrays.asList(directory.toFile().listFiles(file -> isDexFile(file.toPath()))).stream()
+          .map(file -> file.toPath()).collect(Collectors.toList());
+      addProgramFiles(resources);
       File mapFile = new File(directory.toFile(), DEFAULT_PROGUARD_MAP_FILE);
       if (mapFile.exists()) {
         setProguardMapFile(mapFile.toPath());
@@ -424,7 +417,14 @@ public class AndroidApp {
      * Add program file resources.
      */
     public Builder addProgramFiles(Path... files) throws IOException {
-      return addProgramFiles(Arrays.asList(files), false);
+      return addProgramFiles(Arrays.asList(files));
+    }
+
+    /**
+     * Add program file resources.
+     */
+    public Builder addProgramFiles(Collection<Path> files) throws IOException {
+      return addProgramFiles(files, false);
     }
 
     /**
@@ -432,7 +432,7 @@ public class AndroidApp {
      */
     public Builder addProgramFiles(Collection<Path> files, boolean skipDex) throws IOException {
       for (Path file : files) {
-        addFile(file, ClassKind.PROGRAM, skipDex);
+        addProgramFile(file, skipDex);
       }
       return this;
     }
@@ -449,7 +449,7 @@ public class AndroidApp {
      */
     public Builder addClasspathFiles(Collection<Path> files) throws IOException {
       for (Path file : files) {
-        addFile(file, ClassKind.CLASSPATH, false);
+        addClassProvider(file, classpathResourceProviders);
       }
       return this;
     }
@@ -474,7 +474,7 @@ public class AndroidApp {
      */
     public Builder addLibraryFiles(Collection<Path> files) throws IOException {
       for (Path file : files) {
-        addFile(file, ClassKind.LIBRARY, false);
+        addClassProvider(file, libraryResourceProviders);
       }
       return this;
     }
@@ -491,7 +491,7 @@ public class AndroidApp {
      * Add dex program-data with class descriptor.
      */
     public Builder addDexProgramData(byte[] data, Set<String> classDescriptors) {
-      resources(ClassKind.PROGRAM).add(
+      programResources.add(
           Resource.fromBytes(Resource.Kind.DEX, data, classDescriptors));
       return this;
     }
@@ -508,7 +508,7 @@ public class AndroidApp {
      */
     public Builder addDexProgramData(Collection<byte[]> data) {
       for (byte[] datum : data) {
-        resources(ClassKind.PROGRAM).add(Resource.fromBytes(Resource.Kind.DEX, datum));
+        programResources.add(Resource.fromBytes(Resource.Kind.DEX, datum));
       }
       return this;
     }
@@ -525,8 +525,16 @@ public class AndroidApp {
      */
     public Builder addClassProgramData(Collection<byte[]> data) {
       for (byte[] datum : data) {
-        resources(ClassKind.PROGRAM).add(Resource.fromBytes(Resource.Kind.CLASSFILE, datum));
+        programResources.add(Resource.fromBytes(Resource.Kind.CLASSFILE, datum));
       }
+      return this;
+    }
+
+    /**
+     * Set dead-code data.
+     */
+    public Builder setDeadCode(byte[] content) {
+      deadCode = content == null ? null : Resource.fromBytes(null, content);
       return this;
     }
 
@@ -591,44 +599,45 @@ public class AndroidApp {
     public AndroidApp build() {
       return new AndroidApp(
           ImmutableList.copyOf(programResources),
-          ImmutableList.copyOf(classpathResources),
-          ImmutableList.copyOf(libraryResources),
           ImmutableList.copyOf(classpathResourceProviders),
           ImmutableList.copyOf(libraryResourceProviders),
+          deadCode,
           proguardMap,
           proguardSeeds,
           packageDistribution,
           mainDexList);
     }
 
-    private List<Resource> resources(ClassKind classKind) {
-      switch (classKind) {
-        case PROGRAM:
-          return programResources;
-        case CLASSPATH:
-          return classpathResources;
-        case LIBRARY:
-          return libraryResources;
-      }
-      throw new Unreachable();
-    }
-
-    private void addFile(Path file, ClassKind classKind, boolean skipDex) throws IOException {
+    private void addProgramFile(Path file, boolean skipDex) throws IOException {
       if (!Files.exists(file)) {
         throw new FileNotFoundException("Non-existent input file: " + file);
       }
       if (isDexFile(file) && !skipDex) {
-        resources(classKind).add(Resource.fromFile(Resource.Kind.DEX, file));
+        programResources.add(Resource.fromFile(Resource.Kind.DEX, file));
       } else if (isClassFile(file)) {
-        resources(classKind).add(Resource.fromFile(Resource.Kind.CLASSFILE, file));
+        programResources.add(Resource.fromFile(Resource.Kind.CLASSFILE, file));
       } else if (isArchive(file)) {
-        addArchive(file, classKind, skipDex);
+        addProgramArchive(file);
       } else {
         throw new CompilationError("Unsupported source file type for file: " + file);
       }
     }
 
-    private void addArchive(Path archive, ClassKind classKind, boolean skipDex) throws IOException {
+    private void addClassProvider(Path file, List<ClassFileResourceProvider> providerList)
+        throws IOException {
+      if (!Files.exists(file)) {
+        throw new FileNotFoundException("Non-existent input file: " + file);
+      }
+      if (isArchive(file)) {
+        providerList.add(PreloadedClassFileProvider.fromArchive(file));
+      } else if (Files.isDirectory(file) ) {
+        providerList.add(DirectoryClassFileProvider.fromDirectory(file));
+      } else {
+        throw new CompilationError("Unsupported source file type for file: " + file);
+      }
+    }
+
+    private void addProgramArchive(Path archive) throws IOException {
       assert isArchive(archive);
       boolean containsDexData = false;
       boolean containsClassData = false;
@@ -636,14 +645,14 @@ public class AndroidApp {
         ZipEntry entry;
         while ((entry = stream.getNextEntry()) != null) {
           Path name = Paths.get(entry.getName());
-          if (isDexFile(name) && !skipDex) {
+          if (isDexFile(name)) {
             containsDexData = true;
-            resources(classKind).add(Resource.fromBytes(
+            programResources.add(Resource.fromBytes(
                 Resource.Kind.DEX, ByteStreams.toByteArray(stream)));
           } else if (isClassFile(name)) {
             containsClassData = true;
             String descriptor = PreloadedClassFileProvider.guessTypeDescriptor(name);
-            resources(classKind).add(Resource.fromBytes(Resource.Kind.CLASSFILE,
+            programResources.add(Resource.fromBytes(Resource.Kind.CLASSFILE,
                 ByteStreams.toByteArray(stream), Collections.singleton(descriptor)));
           }
         }
