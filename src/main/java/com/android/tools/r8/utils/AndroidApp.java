@@ -424,15 +424,8 @@ public class AndroidApp {
      * Add program file resources.
      */
     public Builder addProgramFiles(Collection<Path> files) throws IOException {
-      return addProgramFiles(files, false);
-    }
-
-    /**
-     * Add program file resources.
-     */
-    public Builder addProgramFiles(Collection<Path> files, boolean skipDex) throws IOException {
       for (Path file : files) {
-        addProgramFile(file, skipDex);
+        addProgramFile(file);
       }
       return this;
     }
@@ -608,16 +601,16 @@ public class AndroidApp {
           mainDexList);
     }
 
-    private void addProgramFile(Path file, boolean skipDex) throws IOException {
+    private void addProgramFile(Path file) throws IOException {
       if (!Files.exists(file)) {
         throw new FileNotFoundException("Non-existent input file: " + file);
       }
-      if (isDexFile(file) && !skipDex) {
+      if (isDexFile(file)) {
         programResources.add(Resource.fromFile(Resource.Kind.DEX, file));
       } else if (isClassFile(file)) {
         programResources.add(Resource.fromFile(Resource.Kind.CLASSFILE, file));
       } else if (isArchive(file)) {
-        addProgramArchive(file, skipDex);
+        addProgramArchive(file);
       } else {
         throw new CompilationError("Unsupported source file type for file: " + file);
       }
@@ -638,10 +631,6 @@ public class AndroidApp {
     }
 
     private void addProgramArchive(Path archive) throws IOException {
-      addProgramArchive(archive, false);
-    }
-
-    private void addProgramArchive(Path archive, boolean skipDex) throws IOException {
       assert isArchive(archive);
       boolean containsDexData = false;
       boolean containsClassData = false;
@@ -649,7 +638,7 @@ public class AndroidApp {
         ZipEntry entry;
         while ((entry = stream.getNextEntry()) != null) {
           Path name = Paths.get(entry.getName());
-          if (isDexFile(name) && !skipDex) {
+          if (isDexFile(name)) {
             containsDexData = true;
             programResources.add(Resource.fromBytes(
                 Resource.Kind.DEX, ByteStreams.toByteArray(stream)));

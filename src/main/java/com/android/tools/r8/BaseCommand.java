@@ -126,8 +126,8 @@ abstract class BaseCommand {
     }
 
     /** Add program file resources. */
-    public B addProgramFiles(Collection<Path> files, boolean skipDex) throws IOException {
-      app.addProgramFiles(files, skipDex);
+    public B addProgramFiles(Collection<Path> files) throws IOException {
+      app.addProgramFiles(files);
       return self();
     }
 

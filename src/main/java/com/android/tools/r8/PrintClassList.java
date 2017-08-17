@@ -37,7 +37,7 @@ public class PrintClassList {
       builder.setProguardMapFile(Paths.get(args[0]));
       dexFiles = dexFiles.subList(1, dexFiles.size());
     }
-    builder.addProgramFiles(ListUtils.map(dexFiles, Paths::get), false);
+    builder.addProgramFiles(ListUtils.map(dexFiles, Paths::get));
 
     ExecutorService executorService = Executors.newCachedThreadPool();
     DexApplication application =

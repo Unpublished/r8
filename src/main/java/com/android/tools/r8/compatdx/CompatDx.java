@@ -452,10 +452,9 @@ public class CompatDx {
     try {
        result = D8.run(
           D8Command.builder()
-              .addProgramFiles(inputs, true)
+              .addProgramFiles(inputs)
               .setMode(mode)
-              .setMinApiLevel(
-                  dexArgs.multiDex && dexArgs.minApiLevel < 21 ? 21 : dexArgs.minApiLevel)
+              .setMinApiLevel(dexArgs.minApiLevel)
               .setMainDexListFile(mainDexList)
               .build());
     } finally {
