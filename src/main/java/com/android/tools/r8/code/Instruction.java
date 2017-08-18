@@ -34,22 +34,21 @@ public abstract class Instruction {
     this.offset = -1;
   }
 
-  static int readSigned8BitValue(BytecodeStream stream) {
+  static byte readSigned8BitValue(BytecodeStream stream) {
     return (byte) stream.nextByte();
   }
 
-  static int read8BitValue(BytecodeStream stream) {
-    int result = stream.nextByte();
-    return result;
+  static short read8BitValue(BytecodeStream stream) {
+    return (short) stream.nextByte();
   }
 
-  static int readSigned16BitValue(BytecodeStream stream) {
+  static short readSigned16BitValue(BytecodeStream stream) {
     // Convert to signed.
     return (short) stream.nextShort();
   }
 
-  static int read16BitValue(BytecodeStream stream) {
-    return stream.nextShort() & 0xffff;
+  static char read16BitValue(BytecodeStream stream) {
+    return (char) (stream.nextShort() & 0xffff);
   }
 
   static int readSigned32BitValue(BytecodeStream stream) {
@@ -143,9 +142,18 @@ public abstract class Instruction {
     return 0;
   }
 
+  static String formatOffset(int offset) {
+    return StringUtils.hexString(offset, 2);
+  }
+
+  String formatRelativeOffset(int offset) {
+    String relativeString = offset >= 0 ? ("+" + offset) : Integer.toString(offset);
+    return formatOffset(getOffset() + offset) + " (" + relativeString + ")";
+  }
+
   String formatString(String left) {
     StringBuilder builder = new StringBuilder();
-    StringUtils.appendLeftPadded(builder, Integer.toString(getOffset()), 6);
+    StringUtils.appendLeftPadded(builder, formatOffset(getOffset()), 6);
     builder.append(": ");
     StringUtils.appendRightPadded(builder, getName(), 20);
     builder.append(left == null ? "" : left);

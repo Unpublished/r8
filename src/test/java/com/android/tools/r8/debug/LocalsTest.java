@@ -317,4 +317,157 @@ public class LocalsTest extends DebugTestBase {
         run());
   }
 
+  @Test
+  public void testInvokeRangeLongThrowOnDiv() throws Throwable {
+    final int initialValueOfX = 21;
+    final long expectedValueOfL = (long) initialValueOfX * 2;
+    runDebugTest("Locals",
+        breakpoint("Locals", "foo"),
+        run(),
+        // Initialize obj to 42 using original value of x.
+        stepOver(),
+        // Set value of x to zero which will cause a div-by-zero arithmetic exception below.
+        checkLocal("x", Value.createInt(initialValueOfX)),
+        setLocal("x", Value.createInt(0)),
+        // Single step until the catch handler triggers.
+        checkLine(SOURCE_FILE, 166), stepOver(),
+        checkLine(SOURCE_FILE, 168), stepOver(),
+        checkLine(SOURCE_FILE, 169), stepOver(),
+        // At the catch handler, inspect the initial state of locals.
+        checkLine(SOURCE_FILE, 172),
+        checkLocal("x", Value.createInt(0)),
+        getLocal("obj", value -> Assert.assertEquals(Tag.OBJECT_TAG, value.getTag())),
+        checkLocal("l", Value.createLong(expectedValueOfL)),
+        // Step onto first line of catch handler and inspect again, including the exception local.
+        stepOver(),
+        checkLine(SOURCE_FILE, 173),
+        getLocal("e", value -> Assert.assertEquals(Tag.OBJECT_TAG, value.getTag())),
+        checkLocal("x", Value.createInt(0)),
+        getLocal("obj", value -> Assert.assertEquals(Tag.OBJECT_TAG, value.getTag())),
+        checkLocal("l", Value.createLong(expectedValueOfL)),
+        run());
+  }
+
+  @Test
+  public void testStepEmptyForLoopBody1() throws Throwable {
+    runDebugTest(
+        "Locals",
+        breakpoint("Locals", "stepEmptyForLoopBody1"),
+        run(),
+        checkLocal("n", Value.createInt(3)),
+        checkNoLocal("i"),
+        stepOver(),
+        checkLocal("n", Value.createInt(3)),
+        checkLocal("i", Value.createInt(3)),
+        run());
+  }
+
+  @Test
+  public void testStepEmptyForLoopBody2() throws Throwable {
+    runDebugTest(
+        "Locals",
+        breakpoint("Locals", "stepEmptyForLoopBody2"),
+        run(),
+        checkLocal("n", Value.createInt(3)),
+        checkNoLocal("i"),
+        stepOver(),
+        checkLocal("n", Value.createInt(3)),
+        checkLocal("i", Value.createInt(3)),
+        run());
+  }
+
+  @Test
+  public void testStepNonEmptyForLoopBody() throws Throwable {
+    final int LOOP_HEADER_LINE = 207;
+    final int LOOP_BODY_LINE = 208;
+    final int RETURN_LINE = 209;
+    final Value N = Value.createInt(3);
+    final Value I0 = Value.createInt(0);
+    final Value I1 = Value.createInt(1);
+    final Value I2 = Value.createInt(2);
+    final Value I3 = Value.createInt(3);
+    runDebugTest(
+        "Locals",
+        breakpoint("Locals", "stepNonEmptyForLoopBody"),
+        run(),
+        checkLine(SOURCE_FILE, LOOP_HEADER_LINE),
+        checkLocal("n", N),
+        checkNoLocal("i"),
+        stepOver(),
+        checkLine(SOURCE_FILE, LOOP_BODY_LINE),
+        checkLocal("n", N),
+        checkLocal("i", I0),
+        stepOver(),
+        checkLine(SOURCE_FILE, LOOP_HEADER_LINE),
+        checkLocal("n", N),
+        checkLocal("i", I0),
+        stepOver(),
+        checkLine(SOURCE_FILE, LOOP_BODY_LINE),
+        checkLocal("n", N),
+        checkLocal("i", I1),
+        stepOver(),
+        checkLine(SOURCE_FILE, LOOP_HEADER_LINE),
+        checkLocal("n", N),
+        checkLocal("i", I1),
+        stepOver(),
+        checkLine(SOURCE_FILE, LOOP_BODY_LINE),
+        checkLocal("n", N),
+        checkLocal("i", I2),
+        stepOver(),
+        checkLine(SOURCE_FILE, LOOP_HEADER_LINE),
+        checkLocal("n", N),
+        checkLocal("i", I2),
+        stepOver(),
+        checkLine(SOURCE_FILE, RETURN_LINE),
+        checkLocal("n", N),
+        checkLocal("i", I3),
+        run());
+  }
+
+  @Test
+  public void tempInCase() throws Throwable {
+    runDebugTest(
+        "Locals",
+        breakpoint("Locals", "tempInCase"),
+        run(),
+        checkLine(SOURCE_FILE, 215),
+        checkLocal("x", Value.createInt(42)),
+        stepOver(),
+        checkLine(SOURCE_FILE, 216),
+        checkLocal("res", Value.createInt(0)),
+        checkNoLocal("i"),
+        stepOver(),
+        checkLine(SOURCE_FILE, 217),
+        stepOver(),
+        checkLine(SOURCE_FILE, 218),
+        checkLocal("rem", Value.createInt(42)),
+        setLocal("rem", Value.createInt(1)),
+        stepOver(),
+        checkLine(SOURCE_FILE, 220),
+        checkLocal("res", Value.createInt(0)),
+        run());
+  }
+
+  @Test
+  public void localSwap() throws Throwable {
+    runDebugTest(
+        "Locals",
+        breakpoint("Locals", "localSwap"),
+        run(),
+        checkLine(SOURCE_FILE, 238),
+        stepOver(),
+        checkLine(SOURCE_FILE, 240),
+        stepOver(),
+        checkLine(SOURCE_FILE, 241),
+        checkLocal("x", Value.createInt(1)),
+        checkLocal("y", Value.createInt(2)),
+        checkLocal("t", Value.createInt(1)),
+        stepOver(),
+        stepOver(),
+        checkLine(SOURCE_FILE, 244),
+        checkLocal("x", Value.createInt(2)),
+        checkLocal("y", Value.createInt(1)),
+        checkNoLocal("t"),
+        run());
+  }
 }

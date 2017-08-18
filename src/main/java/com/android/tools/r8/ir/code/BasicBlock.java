@@ -4,6 +4,7 @@
 package com.android.tools.r8.ir.code;
 
 import com.android.tools.r8.errors.CompilationError;
+import com.android.tools.r8.errors.Unreachable;
 import com.android.tools.r8.graph.DebugLocalInfo;
 import com.android.tools.r8.graph.DexType;
 import com.android.tools.r8.ir.conversion.DexBuilder;
@@ -41,6 +42,12 @@ public class BasicBlock {
 
   public Int2ReferenceMap<DebugLocalInfo> getLocalsAtEntry() {
     return localsAtEntry;
+  }
+
+  public void replaceLastInstruction(Instruction instruction) {
+    InstructionListIterator iterator = listIterator(getInstructions().size());
+    iterator.previous();
+    iterator.replaceCurrentInstruction(instruction);
   }
 
   public enum ThrowingInfo {
@@ -376,6 +383,18 @@ public class BasicBlock {
     assert filled;
     assert instructions.get(instructions.size() - 1).isJumpInstruction();
     return instructions.get(instructions.size() - 1).asJumpInstruction();
+  }
+
+  public Instruction exceptionalExit() {
+    assert hasCatchHandlers();
+    ListIterator<Instruction> it = listIterator(instructions.size());
+    while (it.hasPrevious()) {
+      Instruction instruction = it.previous();
+      if (instruction.instructionTypeCanThrow()) {
+        return instruction;
+      }
+    }
+    throw new Unreachable();
   }
 
   public void clearUserInfo() {
@@ -1094,7 +1113,7 @@ public class BasicBlock {
       catchSuccessor.splitCriticalExceptionEdges(
           code.valueNumberGenerator,
           newBlock -> {
-            newBlock.setNumber(code.blocks.size());
+            newBlock.setNumber(code.getHighestBlockNumber() + 1);
             blockIterator.add(newBlock);
           });
     }
@@ -1120,11 +1139,13 @@ public class BasicBlock {
     List<BasicBlock> predecessors = this.getPredecessors();
     boolean hasMoveException = entry().isMoveException();
     MoveException move = null;
+    DebugPosition position = null;
     if (hasMoveException) {
       // Remove the move-exception instruction.
       move = entry().asMoveException();
+      position = move.getPosition();
       assert move.getPreviousLocalValue() == null;
-      this.getInstructions().remove(0);
+      getInstructions().remove(0);
     }
     // Create new predecessor blocks.
     List<BasicBlock> newPredecessors = new ArrayList<>();
@@ -1140,7 +1161,11 @@ public class BasicBlock {
         Value value = new Value(
             valueNumberGenerator.next(), MoveType.OBJECT, move.getDebugInfo());
         values.add(value);
-        newBlock.add(new MoveException(value));
+        MoveException newMove = new MoveException(value);
+        newBlock.add(newMove);
+        if (position != null) {
+          newMove.setPosition(new DebugPosition(position.line, position.file));
+        }
       }
       newBlock.add(new Goto());
       newBlock.close(null);

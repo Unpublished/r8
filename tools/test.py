@@ -44,7 +44,8 @@ def ParseOptions():
       help='Print a line before a tests starts and after it ends to stdout.',
       default=False, action='store_true')
   result.add_option('--tool',
-      help='Tool to run ART tests with: "r8" (default) or "d8". Ignored if "--all_tests" enabled.',
+      help='Tool to run ART tests with: "r8" (default) or "d8". Ignored if'
+          ' "--all_tests" enabled.',
       default=None, choices=["r8", "d8"])
   result.add_option('--jctf',
       help='Run JCTF tests with: "r8" (default) or "d8".',
@@ -56,8 +57,15 @@ def ParseOptions():
       help="Don't run, only compile JCTF tests.",
       default=False, action='store_true')
   result.add_option('--disable_assertions',
-      help="Disable assertions when running tests.",
+      help='Disable assertions when running tests.',
       default=False, action='store_true')
+  result.add_option('--with_code_coverage',
+      help='Enable code coverage with Jacoco.',
+      default=False, action='store_true')
+  result.add_option('--test_dir',
+      help='Use a custom directory for the test artifacts instead of a'
+          ' temporary (which is automatically removed after the test).'
+          ' Note that the directory will not be cleared before the test.')
 
   return result.parse_args()
 
@@ -66,15 +74,18 @@ def archive_failures():
   u_dir = uuid.uuid4()
   destination = 'gs://%s/%s' % (BUCKET, u_dir)
   utils.upload_html_to_cloud_storage(upload_dir, destination)
-  url = 'http://storage.googleapis.com/%s/%s/index.html' % (BUCKET, u_dir)
+  url = 'http://storage.googleapis.com/%s/%s/test/index.html' % (BUCKET, u_dir)
   print 'Test results available at: %s' % url
+  print '@@@STEP_LINK@Test failures@%s@@@' % url
 
 def Main():
   (options, args) = ParseOptions()
-  gradle_args = ['cleanTest', 'test']
   if len(args) > 1:
     print("test.py takes at most one argument, the pattern for tests to run")
     return -1
+
+  gradle_args = []
+  # Set all necessary Gradle properties and options first.
   if options.verbose:
     gradle_args.append('-Pprint_test_stdout')
   if options.no_internal:
@@ -95,9 +106,8 @@ def Main():
     gradle_args.append('-Pjctf_compile_only')
   if options.disable_assertions:
     gradle_args.append('-Pdisable_assertions')
-  if len(args) > 0:
-    gradle_args.append('--tests')
-    gradle_args.append(args[0])
+  if options.with_code_coverage:
+    gradle_args.append('-Pwith_code_coverage')
   if os.name == 'nt':
     # temporary hack
     gradle_args.append('-Pno_internal')
@@ -107,12 +117,29 @@ def Main():
     gradle_args.append('jctfCommonJar')
     gradle_args.append('-x')
     gradle_args.append('jctfTestsClasses')
+  if options.test_dir:
+    gradle_args.append('-Ptest_dir=' + options.test_dir)
+    if not os.path.exists(options.test_dir):
+      os.makedirs(options.test_dir)
+
+  # Add Gradle tasks
+  gradle_args.append('cleanTest')
+  gradle_args.append('test')
+  if len(args) > 0:
+    # Test filtering. Must always follow the 'test' task.
+    gradle_args.append('--tests')
+    gradle_args.append(args[0])
+  if options.with_code_coverage:
+    # Create Jacoco report after tests.
+    gradle_args.append('jacocoTestReport')
+
+  # Now run tests on selected runtime(s).
   vms_to_test = [options.dex_vm] if options.dex_vm != "all" else ALL_ART_VMS
   for art_vm in vms_to_test:
     return_code = gradle.RunGradle(gradle_args + ['-Pdex_vm=%s' % art_vm],
                                    throw_on_failure=False)
     if return_code != 0:
-      if options.archive_failures:
+      if options.archive_failures and os.name != 'nt':
         archive_failures()
       return return_code
 

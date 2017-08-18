@@ -219,6 +219,12 @@ public class Value {
     return numberOfUsers() + numberOfPhiUsers() + numberOfDebugUsers();
   }
 
+  public boolean isUsed() {
+    return !users.isEmpty()
+        || !phiUsers.isEmpty()
+        || ((debugData != null) && !debugData.debugUsers.isEmpty());
+  }
+
   public void addUser(Instruction user) {
     users.add(user);
     uniqueUsers = null;
@@ -348,7 +354,7 @@ public class Value {
   }
 
   public boolean internalComputeNeedsRegister() {
-    if (!isConstant()) {
+    if (!isConstNumber()) {
       return true;
     }
     if (numberOfPhiUsers() > 0) {
@@ -416,6 +422,14 @@ public class Value {
     return definition.getOutConstantConstInstruction();
   }
 
+  public boolean isConstNumber() {
+    return isConstant() && getConstInstruction().isConstNumber();
+  }
+
+  public boolean isConstString() {
+    return isConstant() && getConstInstruction().isConstString();
+  }
+
   public boolean isConstant() {
     return definition.isOutConstant() && getLocalInfo() == null;
   }
@@ -475,11 +489,11 @@ public class Value {
   }
 
   public boolean hasValueRange() {
-    return valueRange != null || isConstant();
+    return valueRange != null || isConstNumber();
   }
 
   public boolean isValueInRange(int value) {
-    if (isConstant()) {
+    if (isConstNumber()) {
       return value == getConstInstruction().asConstNumber().getIntValue();
     } else {
       return valueRange != null && valueRange.containsValue(value);
@@ -487,7 +501,7 @@ public class Value {
   }
 
   public LongInterval getValueRange() {
-    if (isConstant()) {
+    if (isConstNumber()) {
       if (type == MoveType.SINGLE) {
         int value = getConstInstruction().asConstNumber().getIntValue();
         return new LongInterval(value, value);
@@ -503,7 +517,7 @@ public class Value {
 
   public boolean isDead(InternalOptions options) {
     // Totally unused values are trivially dead.
-    return numberOfAllUsers() == 0 || isDead(new HashSet<>(), options);
+    return !isUsed() || isDead(new HashSet<>(), options);
   }
 
   protected boolean isDead(Set<Value> active, InternalOptions options) {

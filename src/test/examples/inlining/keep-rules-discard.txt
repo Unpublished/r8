@@ -8,10 +8,11 @@
   public static void main(...);
 }
 
-# allow access modification to enable minifcation
--allowaccessmodification
-
 # check that methods have been inlined
 -checkdiscard class * {
   @inlining.CheckDiscarded *;
+}
+
+-alwaysinline class * {
+  @inlining.AlwaysInline <methods>;
 }

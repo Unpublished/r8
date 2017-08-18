@@ -8,7 +8,10 @@ import static com.android.tools.r8.R8Command.USAGE_MESSAGE;
 import com.android.tools.r8.dex.ApplicationReader;
 import com.android.tools.r8.dex.ApplicationWriter;
 import com.android.tools.r8.dex.Constants;
+import com.android.tools.r8.dex.Marker;
+import com.android.tools.r8.dex.Marker.Tool;
 import com.android.tools.r8.errors.CompilationError;
+import com.android.tools.r8.errors.MainDexError;
 import com.android.tools.r8.graph.AppInfo;
 import com.android.tools.r8.graph.AppInfoWithSubtyping;
 import com.android.tools.r8.graph.ClassAndMemberPublicizer;
@@ -16,6 +19,8 @@ import com.android.tools.r8.graph.DexApplication;
 import com.android.tools.r8.graph.DexType;
 import com.android.tools.r8.graph.GraphLense;
 import com.android.tools.r8.ir.conversion.IRConverter;
+import com.android.tools.r8.ir.optimize.EnumOrdinalMapCollector;
+import com.android.tools.r8.ir.optimize.SwitchMapCollector;
 import com.android.tools.r8.naming.Minifier;
 import com.android.tools.r8.naming.NamingLens;
 import com.android.tools.r8.optimize.BridgeMethodAnalysis;
@@ -35,6 +40,7 @@ import com.android.tools.r8.shaking.RootSetBuilder;
 import com.android.tools.r8.shaking.RootSetBuilder.RootSet;
 import com.android.tools.r8.shaking.SimpleClassMerger;
 import com.android.tools.r8.shaking.TreePruner;
+import com.android.tools.r8.shaking.protolite.ProtoLiteExtension;
 import com.android.tools.r8.utils.AndroidApp;
 import com.android.tools.r8.utils.CfgPrinter;
 import com.android.tools.r8.utils.FileUtils;
@@ -65,13 +71,23 @@ import java.util.concurrent.Executors;
 
 public class R8 {
 
+  private static final String VERSION = "v0.1.0";
   private final Timing timing = new Timing("R8");
   private final InternalOptions options;
 
-  // TODO(zerny): Refactor tests to go through testing methods and make this private.
-  public R8(InternalOptions options) {
+  private R8(InternalOptions options) {
     this.options = options;
     options.itemFactory.resetSortedIndices();
+  }
+
+  // Compute the marker to be placed in the main dex file.
+  private static Marker getMarker(InternalOptions options) {
+    if (options.hasMarker()) {
+      return options.getMarker();
+    }
+    return new Marker(Tool.R8)
+        .put("version", VERSION)
+        .put("min-api", options.minApiLevel);
   }
 
   public static AndroidApp writeApplication(
@@ -85,22 +101,34 @@ public class R8 {
       InternalOptions options)
       throws ExecutionException {
     try {
+      Marker marker = getMarker(options);
       return new ApplicationWriter(
-          application, appInfo, options, deadCode, namingLens, proguardSeedsData)
+          application, appInfo, options, marker, deadCode, namingLens, proguardSeedsData)
           .write(packageDistribution, executorService);
     } catch (IOException e) {
       throw new RuntimeException("Cannot write dex application", e);
     }
   }
 
-  public DexApplication optimize(DexApplication application, AppInfoWithSubtyping appInfo)
+  static DexApplication optimize(
+      DexApplication application,
+      AppInfoWithSubtyping appInfo,
+      InternalOptions options)
+      throws ProguardRuleParserException, ExecutionException, IOException {
+    return new R8(options).optimize(application, appInfo);
+  }
+
+  private DexApplication optimize(DexApplication application, AppInfoWithSubtyping appInfo)
       throws IOException, ProguardRuleParserException, ExecutionException {
     return optimize(application, appInfo, GraphLense.getIdentityLense(),
         Executors.newSingleThreadExecutor());
   }
 
-  public DexApplication optimize(DexApplication application, AppInfoWithSubtyping appInfo,
-      GraphLense graphLense, ExecutorService executorService)
+  private DexApplication optimize(
+      DexApplication application,
+      AppInfoWithSubtyping appInfo,
+      GraphLense graphLense,
+      ExecutorService executorService)
       throws IOException, ProguardRuleParserException, ExecutionException {
     final CfgPrinter printer = options.printCfg ? new CfgPrinter() : null;
 
@@ -216,7 +244,8 @@ public class R8 {
       timing.begin("Strip unused code");
       try {
         Set<DexType> missingClasses = appInfo.getMissingClasses();
-        missingClasses = filterMissingClasses(missingClasses, options.dontWarnPatterns);
+        missingClasses = filterMissingClasses(
+            missingClasses, options.proguardConfiguration.getDontWarnPatterns());
         if (!missingClasses.isEmpty()) {
           System.err.println();
           System.err.println("WARNING, some classes are missing:");
@@ -228,10 +257,12 @@ public class R8 {
                 "Shrinking can't be performed because some library classes are missing.");
           }
         }
-        rootSet = new RootSetBuilder(application, appInfo, options.keepRules).run(executorService);
+        rootSet = new RootSetBuilder(application, appInfo, options.proguardConfiguration.getRules())
+            .run(executorService);
         Enqueuer enqueuer = new Enqueuer(appInfo);
+        enqueuer.addExtension(new ProtoLiteExtension(appInfo));
         appInfo = enqueuer.traceApplication(rootSet, timing);
-        if (options.printSeeds) {
+        if (options.proguardConfiguration.isPrintSeeds()) {
           ByteArrayOutputStream bytes = new ByteArrayOutputStream();
           PrintStream out = new PrintStream(bytes);
           RootSetBuilder.writeSeeds(appInfo.withLiveness().pinnedItems, out);
@@ -249,7 +280,7 @@ public class R8 {
         timing.end();
       }
 
-      if (options.allowAccessModification) {
+      if (options.proguardConfiguration.isAccessModificationAllowed()) {
         ClassAndMemberPublicizer.run(application);
         // We can now remove visibility bridges. Note that we do not need to update the
         // invoke-targets here, as the existing invokes will simply dispatch to the now
@@ -259,8 +290,7 @@ public class R8 {
 
       GraphLense graphLense = GraphLense.getIdentityLense();
 
-      if (appInfo.withLiveness() != null) {
-        // No-op until class merger is added.
+      if (appInfo.hasLiveness()) {
         graphLense = new MemberRebindingAnalysis(appInfo.withLiveness(), graphLense).run();
         // Class merging requires inlining.
         if (!options.skipClassMerging && options.inlineAccessors) {
@@ -271,6 +301,9 @@ public class R8 {
         }
         appInfo = appInfo.withLiveness().prunedCopyFrom(application);
         appInfo = appInfo.withLiveness().rewrittenWithLense(graphLense);
+        // Collect switch maps and ordinals maps.
+        new SwitchMapCollector(appInfo.withLiveness(), options).run();
+        new EnumOrdinalMapCollector(appInfo.withLiveness(), options).run();
       }
 
       graphLense = new BridgeMethodAnalysis(graphLense, appInfo.withSubtyping()).run();
@@ -353,12 +386,13 @@ public class R8 {
 
       options.printWarnings();
       return new CompilationResult(androidApp, application, appInfo);
+    } catch (MainDexError mainDexError) {
+      throw new CompilationError(mainDexError.getMessageForR8());
     } catch (ExecutionException e) {
       if (e.getCause() instanceof CompilationError) {
         throw (CompilationError) e.getCause();
-      } else {
-        throw new RuntimeException(e.getMessage(), e.getCause());
       }
+      throw new RuntimeException(e.getMessage(), e.getCause());
     } finally {
       // Dump timings.
       if (options.printTimes) {
@@ -392,29 +426,29 @@ public class R8 {
       outputApp.write(command.getOutputPath(), options.outputMode);
     }
 
-    if (options.printMapping && !options.skipMinification) {
+    if (options.proguardConfiguration.isPrintMapping() && !options.skipMinification) {
       assert outputApp.hasProguardMap();
       try (Closer closer = Closer.create()) {
         OutputStream mapOut = FileUtils.openPathWithDefault(
             closer,
-            options.printMappingFile,
+            options.proguardConfiguration.getPrintMappingFile(),
             System.out,
             StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-        outputApp.writeProguardMap(closer, mapOut);
+        outputApp.writeProguardMap(mapOut);
       }
     }
-    if (options.printSeeds) {
+    if (options.proguardConfiguration.isPrintSeeds()) {
       assert outputApp.hasProguardSeeds();
       try (Closer closer = Closer.create()) {
         OutputStream seedsOut = FileUtils.openPathWithDefault(
             closer,
-            options.seedsFile,
+            options.proguardConfiguration.getSeedFile(),
             System.out,
             StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
         outputApp.writeProguardSeeds(closer, seedsOut);
       }
     }
-    if (options.printMainDexList && outputApp.hasMainDexList()) {
+    if (outputApp.hasMainDexListOutput()) {
       try (Closer closer = Closer.create()) {
         OutputStream mainDexOut =
             FileUtils.openPathWithDefault(
@@ -425,11 +459,11 @@ public class R8 {
         outputApp.writeMainDexList(closer, mainDexOut);
       }
     }
-    if (options.printUsage && outputApp.hasDeadCode()) {
+    if (options.proguardConfiguration.isPrintUsage() && outputApp.hasDeadCode()) {
       try (Closer closer = Closer.create()) {
         OutputStream deadCodeOut = FileUtils.openPathWithDefault(
             closer,
-            options.printUsageFile,
+            options.proguardConfiguration.getPrintUsageFile(),
             System.out,
             StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
         outputApp.writeDeadCode(closer, deadCodeOut);
@@ -468,7 +502,7 @@ public class R8 {
       return;
     }
     if (command.isPrintVersion()) {
-      System.out.println("R8 v0.0.1");
+      System.out.println("R8 " + VERSION);
       return;
     }
     run(command);

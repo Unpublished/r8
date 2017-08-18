@@ -30,13 +30,14 @@ public class YouTubeTreeShakeJarVerificationTest extends YouTubeCompilationBase 
         BASE + APK,
         null,
         BASE + PG_CONF,
+        null,
         // Don't pass any inputs. The input will be read from the -injars in the Proguard
         // configuration file.
         ImmutableList.of());
     int bytes = 0;
     try (Closer closer = Closer.create()) {
       for (Resource dex : app.getDexProgramResources()) {
-        bytes += ByteStreams.toByteArray(dex.getStream(closer)).length;
+        bytes += ByteStreams.toByteArray(closer.register(dex.getStream())).length;
       }
     }
     assertTrue("Expected max size of " + maxSize + ", got " + bytes, bytes < maxSize);

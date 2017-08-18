@@ -7,7 +7,10 @@ import static com.android.tools.r8.D8Command.USAGE_MESSAGE;
 
 import com.android.tools.r8.dex.ApplicationReader;
 import com.android.tools.r8.dex.ApplicationWriter;
+import com.android.tools.r8.dex.Marker;
+import com.android.tools.r8.dex.Marker.Tool;
 import com.android.tools.r8.errors.CompilationError;
+import com.android.tools.r8.errors.MainDexError;
 import com.android.tools.r8.graph.AppInfo;
 import com.android.tools.r8.graph.DexApplication;
 import com.android.tools.r8.ir.conversion.IRConverter;
@@ -52,6 +55,7 @@ import java.util.concurrent.ExecutorService;
  */
 public final class D8 {
 
+  private static final String VERSION = "v0.1.0";
   private static final int STATUS_ERROR = 1;
 
   private D8() {}
@@ -106,7 +110,7 @@ public final class D8 {
       return;
     }
     if (command.isPrintVersion()) {
-      System.out.println("D8 v0.0.1");
+      System.out.println("D8 " + VERSION);
       return;
     }
     run(command);
@@ -151,14 +155,23 @@ public final class D8 {
     }
   }
 
-  static CompilationResult runForTesting(
+  // Compute the marker to be placed in the main dex file.
+  private static Marker getMarker(InternalOptions options) {
+    if (options.hasMarker()) {
+      return options.getMarker();
+    }
+    return new Marker(Tool.D8)
+        .put("version", VERSION)
+        .put("min-api", options.minApiLevel);
+  }
+
+  private static CompilationResult runForTesting(
       AndroidApp inputApp, InternalOptions options, ExecutorService executor) throws IOException {
     try {
       assert !inputApp.hasPackageDistribution();
 
       // Disable global optimizations.
       options.skipMinification = true;
-      options.allowAccessModification = false;
       options.inlineAccessors = false;
       options.outline.enabled = false;
 
@@ -173,23 +186,24 @@ public final class D8 {
         options.methodsFilter.forEach((m) -> System.out.println("  - " + m));
         return null;
       }
-
+      Marker marker = getMarker(options);
       CompilationResult output =
           new CompilationResult(
               new ApplicationWriter(
-                  app, appInfo, options, null, NamingLens.getIdentityLens(), null)
+                  app, appInfo, options, marker, null, NamingLens.getIdentityLens(), null)
                   .write(null, executor),
               app,
               appInfo);
 
       options.printWarnings();
       return output;
+    } catch (MainDexError mainDexError) {
+      throw new CompilationError(mainDexError.getMessageForD8());
     } catch (ExecutionException e) {
       if (e.getCause() instanceof CompilationError) {
         throw (CompilationError) e.getCause();
-      } else {
-        throw new RuntimeException(e.getMessage(), e.getCause());
       }
+      throw new RuntimeException(e.getMessage(), e.getCause());
     }
   }
 

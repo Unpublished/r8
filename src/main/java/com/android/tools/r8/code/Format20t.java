@@ -10,7 +10,7 @@ import java.nio.ShortBuffer;
 
 abstract class Format20t extends Base2Format {
 
-  public final /* offset */ int AAAA;
+  public /* offset */ short AAAA;
 
   // øø | op | +AAAA
   Format20t(int high, BytecodeStream stream) {
@@ -20,7 +20,7 @@ abstract class Format20t extends Base2Format {
 
   protected Format20t(int AAAA) {
     assert Short.MIN_VALUE <= AAAA && AAAA <= Short.MAX_VALUE;
-    this.AAAA = AAAA;
+    this.AAAA = (short) AAAA;
   }
 
   public void write(ShortBuffer dest, ObjectToOffsetMapping mapping) {
@@ -40,7 +40,7 @@ abstract class Format20t extends Base2Format {
   }
 
   public String toString(ClassNameMapper naming) {
-    return formatString("" + AAAA + " (" + (getOffset() + AAAA) + ")");
+    return formatString("" + AAAA + " " + formatRelativeOffset(AAAA));
   }
 
   public String toSmaliString(ClassNameMapper naming) {

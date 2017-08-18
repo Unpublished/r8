@@ -12,15 +12,15 @@ import java.nio.ShortBuffer;
 
 public abstract class Format22s extends Base2Format {
 
-  public final int A;
-  public final int B;
-  public final int CCCC;
+  public final byte A;
+  public final byte B;
+  public final short CCCC;
 
   // vB | vA | op | #+CCCC
   /*package*/ Format22s(int high, BytecodeStream stream) {
     super(stream);
-    A = high & 0xf;
-    B = (high >> 4) & 0xf;
+    A = (byte) (high & 0xf);
+    B = (byte) ((high >> 4) & 0xf);
     CCCC = readSigned16BitValue(stream);
   }
 
@@ -28,9 +28,9 @@ public abstract class Format22s extends Base2Format {
     assert 0 <= A && A <= Constants.U4BIT_MAX;
     assert 0 <= B && B <= Constants.U4BIT_MAX;
     assert Short.MIN_VALUE <= CCCC && CCCC <= Short.MAX_VALUE;
-    this.A = A;
-    this.B = B;
-    this.CCCC = CCCC;
+    this.A = (byte) A;
+    this.B = (byte) B;
+    this.CCCC = (short) CCCC;
   }
 
   public void write(ShortBuffer dest, ObjectToOffsetMapping mapping) {
@@ -56,7 +56,7 @@ public abstract class Format22s extends Base2Format {
 
   public String toSmaliString(ClassNameMapper naming) {
     return formatSmaliString(
-        "v" + A + ", v" + B + ", 0x" + StringUtils.hexString(CCCC, 4) + "  # " + CCCC);
+        "v" + A + ", v" + B + ", " + StringUtils.hexString(CCCC, 4) + "  # " + CCCC);
   }
 
   @Override

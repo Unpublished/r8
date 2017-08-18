@@ -106,7 +106,7 @@ public class BasicBlockInstructionIterator implements InstructionIterator, Instr
     if (current == null) {
       throw new IllegalStateException();
     }
-    assert current.outValue() == null || current.outValue().numberOfAllUsers() == 0;
+    assert current.outValue() == null || !current.outValue().isUsed();
     for (int i = 0; i < current.inValues().size(); i++) {
       Value value = current.inValues().get(i);
       value.removeUser(current);
@@ -323,7 +323,7 @@ public class BasicBlockInstructionIterator implements InstructionIterator, Instr
     while (inlineeIterator.hasNext()) {
       Instruction instruction = inlineeIterator.next();
       if (instruction.isArgument()) {
-        assert instruction.outValue().numberOfAllUsers() == 0;
+        assert !instruction.outValue().isUsed();
         assert instruction.outValue() == arguments.get(index++);
         inlineeIterator.remove();
       }
@@ -349,6 +349,8 @@ public class BasicBlockInstructionIterator implements InstructionIterator, Instr
     List<Value> arguments = inlinee.collectArguments();
     assert invoke.inValues().size() == arguments.size();
     for (int i = 0; i < invoke.inValues().size(); i++) {
+      // TODO(zerny): Support inlining in --debug mode.
+      assert arguments.get(i).getDebugInfo() == null;
       if ((i == 0) && (downcast != null)) {
         Value invokeValue = invoke.inValues().get(0);
         Value receiverValue = arguments.get(0);

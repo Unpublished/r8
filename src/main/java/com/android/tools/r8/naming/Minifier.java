@@ -36,24 +36,21 @@ public class Minifier {
 
   public NamingLens run(Timing timing) {
     assert !options.skipMinification;
-    if (!options.allowAccessModification) {
+    // TODO(b/62048823): Minifier should not depend on -allowaccessmodification.
+    if (!options.proguardConfiguration.isAccessModificationAllowed()) {
       throw new CompilationError("Minification requires allowaccessmodification.");
     }
     timing.begin("MinifyClasses");
     Map<DexType, DexString> classRenaming =
-        new ClassNameMinifier(
-            appInfo, rootSet, options.packagePrefix, options.classObfuscationDictionary,
-            options.attributeRemoval.signature)
-            .computeRenaming();
+        new ClassNameMinifier(appInfo, rootSet, options).computeRenaming(timing);
     timing.end();
     timing.begin("MinifyMethods");
     Map<DexMethod, DexString> methodRenaming =
-        new MethodNameMinifier(appInfo, rootSet, options.obfuscationDictionary)
-            .computeRenaming(timing);
+        new MethodNameMinifier(appInfo, rootSet, options).computeRenaming(timing);
     timing.end();
     timing.begin("MinifyFields");
     Map<DexField, DexString> fieldRenaming =
-        new FieldNameMinifier(appInfo, rootSet, options.obfuscationDictionary).computeRenaming();
+        new FieldNameMinifier(appInfo, rootSet, options).computeRenaming(timing);
     timing.end();
     return new MinifiedRenaming(classRenaming, methodRenaming, fieldRenaming, appInfo);
   }
@@ -130,6 +127,25 @@ public class Minifier {
           || directTargetHolder != null && directTargetHolder.isLibraryClass()
           || virtualTargetHolder != null && virtualTargetHolder.isLibraryClass()
           || staticTargetHolder != null && staticTargetHolder.isLibraryClass();
+    }
+
+    @Override
+    public String toString() {
+      StringBuilder builder = new StringBuilder();
+      renaming.forEach((item, str) -> {
+        if (item instanceof DexType) {
+          builder.append("[c] ");
+        } else if (item instanceof DexMethod) {
+          builder.append("[m] ");
+        } else if (item instanceof DexField) {
+          builder.append("[f] ");
+        }
+        builder.append(item.toSourceString());
+        builder.append(" -> ");
+        builder.append(str.toSourceString());
+        builder.append('\n');
+      });
+      return builder.toString();
     }
   }
 }

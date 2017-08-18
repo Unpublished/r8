@@ -33,7 +33,10 @@ public class D8Command extends BaseCommand {
    * Builder for constructing a D8Command.
    */
   public static class Builder extends BaseCommand.Builder<D8Command, Builder> {
-    private Builder() {
+
+    private boolean intermediate = false;
+
+    protected Builder() {
       super(CompilationMode.DEBUG);
     }
 
@@ -44,23 +47,36 @@ public class D8Command extends BaseCommand {
     /** Add classpath file resources. */
     public Builder addClasspathFiles(Path... files) throws IOException {
       getAppBuilder().addClasspathFiles(files);
-      return this;
+      return self();
     }
 
     /** Add classpath file resources. */
     public Builder addClasspathFiles(Collection<Path> files) throws IOException {
       getAppBuilder().addClasspathFiles(files);
-      return this;
+      return self();
     }
 
     public Builder addClasspathResourceProvider(ClassFileResourceProvider provider) {
       getAppBuilder().addClasspathResourceProvider(provider);
-      return this;
+      return self();
+    }
+
+    public Builder setIntermediate(boolean value) {
+      this.intermediate = value;
+      return self();
     }
 
     @Override
     Builder self() {
       return this;
+    }
+
+    protected void validate() throws CompilationException {
+      super.validate();
+      if (getAppBuilder().hasMainDexList() && intermediate) {
+        throw new CompilationException(
+            "Option --main-dex-list cannot be used with --intermediate");
+      }
     }
 
     /**
@@ -74,7 +90,12 @@ public class D8Command extends BaseCommand {
 
       validate();
       return new D8Command(
-          getAppBuilder().build(), getOutputPath(), getOutputMode(), getMode(), getMinApiLevel());
+          getAppBuilder().build(),
+          getOutputPath(),
+          getOutputMode(),
+          getMode(),
+          getMinApiLevel(),
+          intermediate);
     }
   }
 
@@ -82,16 +103,21 @@ public class D8Command extends BaseCommand {
       "Usage: d8 [options] <input-files>",
       " where <input-files> are any combination of dex, class, zip, jar, or apk files",
       " and options are:",
-      "  --debug             # Compile with debugging information (default).",
-      "  --release           # Compile without debugging information.",
-      "  --output <file>     # Output result in <outfile>.",
-      "                      # <file> must be an existing directory or a zip file.",
-      "  --lib <file>        # Add <file> as a library resource.",
-      "  --classpath <file>  # Add <file> as a classpath resource.",
-      "  --min-api           # Minimum Android API level compatibility",
-      "  --file-per-class    # Produce a separate dex file per class",
-      "  --version           # Print the version of d8.",
-      "  --help              # Print this message."));
+      "  --debug                 # Compile with debugging information (default).",
+      "  --release               # Compile without debugging information.",
+      "  --output <file>         # Output result in <outfile>.",
+      "                          # <file> must be an existing directory or a zip file.",
+      "  --lib <file>            # Add <file> as a library resource.",
+      "  --classpath <file>      # Add <file> as a classpath resource.",
+      "  --min-api               # Minimum Android API level compatibility",
+      "  --intermediate          # Compile an intermediate result intended for later",
+      "                          # merging.",
+      "  --file-per-class        # Produce a separate dex file per class",
+      "  --main-dex-list <file>  # List of classes to place in the primary dex file.",
+      "  --version               # Print the version of d8.",
+      "  --help                  # Print this message."));
+
+  private boolean intermediate = false;
 
   public static Builder builder() {
     return new Builder();
@@ -140,8 +166,12 @@ public class D8Command extends BaseCommand {
           builder.addLibraryFiles(Paths.get(args[++i]));
         } else if (arg.equals("--classpath")) {
           builder.addClasspathFiles(Paths.get(args[++i]));
+        } else if (arg.equals("--main-dex-list")) {
+          builder.addMainDexListFiles(Paths.get(args[++i]));
         } else if (arg.equals("--min-api")) {
           builder.setMinApiLevel(Integer.valueOf(args[++i]));
+        } else if (arg.equals("--intermediate")) {
+          builder.setIntermediate(true);
         } else {
           if (arg.startsWith("--")) {
             throw new CompilationException("Unknown option: " + arg);
@@ -160,8 +190,10 @@ public class D8Command extends BaseCommand {
       Path outputPath,
       OutputMode outputMode,
       CompilationMode mode,
-      int minApiLevel) {
+      int minApiLevel,
+      boolean intermediate) {
     super(inputApp, outputPath, outputMode, mode, minApiLevel);
+    this.intermediate = intermediate;
   }
 
   private D8Command(boolean printHelp, boolean printVersion) {
@@ -173,7 +205,9 @@ public class D8Command extends BaseCommand {
     InternalOptions internal = new InternalOptions(new DexItemFactory());
     assert !internal.debug;
     internal.debug = getMode() == CompilationMode.DEBUG;
+    internal.minimalMainDex = internal.debug;
     internal.minApiLevel = getMinApiLevel();
+    internal.intermediate = intermediate;
     // Assert and fixup defaults.
     assert !internal.skipMinification;
     internal.skipMinification = true;
@@ -181,8 +215,6 @@ public class D8Command extends BaseCommand {
     internal.useTreeShaking = false;
     assert internal.interfaceMethodDesugaring == OffOrAuto.Off;
     assert internal.tryWithResourcesDesugaring == OffOrAuto.Off;
-    assert internal.allowAccessModification;
-    internal.allowAccessModification = false;
     assert internal.inlineAccessors;
     internal.inlineAccessors = false;
     assert internal.removeSwitchMaps;

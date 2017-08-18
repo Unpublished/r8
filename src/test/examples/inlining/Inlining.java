@@ -3,6 +3,10 @@
 // BSD-style license that can be found in the LICENSE file.
 package inlining;
 
+import inlining.pkg.OtherPublicClass;
+import inlining.pkg.PublicClass;
+import inlining.pkg.Subclass;
+
 class A {
 
   int a;
@@ -14,12 +18,28 @@ class A {
   int a() {
     return a;
   }
+
+  int cannotInline(int v) {
+    // Cannot inline due to recursion.
+    if (v > 0) {
+      return cannotInline(v - 1);
+    }
+    return 42;
+  }
 }
 
 class B extends A {
 
   B(int a) {
     super(a);
+  }
+
+  int cannotInline(int v) {
+    return -1;
+  }
+
+  int callMethodInSuper() {
+    return super.cannotInline(10);
   }
 }
 
@@ -32,13 +52,38 @@ class InlineConstructor {
     this.a = a;
   }
 
-  @CheckDiscarded
   InlineConstructor(long a) {
     this((int) a);
   }
 
+  InlineConstructor(int a, int loopy) {
+    this.a = a;
+    // Make this too big to inline.
+    if (loopy > 10) {
+      throw new RuntimeException("Too big!");
+    }
+    for (int i = 1; i < loopy; i++) {
+      this.a = this.a * i;
+    }
+  }
+
+  @CheckDiscarded
+  InlineConstructor() {
+    this(42, 9);
+  }
+
   static InlineConstructor create() {
     return new InlineConstructor(10L);
+  }
+
+  static InlineConstructor createMore() {
+    new InlineConstructor(0, 0);
+    new InlineConstructor(0, 0);
+    new InlineConstructor(0, 0);
+    new InlineConstructor(0, 0);
+    new InlineConstructor(0, 0);
+    new InlineConstructor(0, 0);
+    return new InlineConstructor();
   }
 }
 
@@ -132,8 +177,31 @@ public class Inlining {
 
     InlineConstructor ic = InlineConstructor.create();
     Assert(ic != null);
+    InlineConstructor ic2 = InlineConstructor.createMore();
+    Assert(ic2 != null);
     InlineConstructorOfInner icoi = new InlineConstructorOfInner();
     Assert(icoi != null);
+
+    // Check that super calls are processed correctly.
+    new B(123).callMethodInSuper();
+
+    // Inline calls to package private methods
+    PublicClass.alsoCallsPackagePrivateMethod();
+    OtherPublicClass.callsMethodThatCallsPackagePrivateMethod();
+    // Inline calls to protected methods.
+    PublicClass.callsProtectedMethod3();
+    PublicClass.alsoReadsPackagePrivateField();
+    OtherPublicClass.callsMethodThatCallsProtectedMethod();
+    OtherPublicClass.callsMethodThatReadsFieldInPackagePrivateClass();
+    Subclass.callsMethodThatCallsProtectedMethod();
+    // Do not inline constructors which set final field.
+    System.out.println(new InlineConstructorFinalField());
+
+    // Call method three times to ensure it would not normally be inlined but force inline anyway.
+    int aNumber = longMethodThatWeShouldNotInline("ha", "li", "lo");
+    aNumber += longMethodThatWeShouldNotInline("zi", "za", "zo");
+    aNumber += longMethodThatWeShouldNotInline("do", "de", "da");
+    System.out.println(aNumber);
   }
 
   private static boolean intCmpExpression(A a, A b) {
@@ -180,6 +248,7 @@ public class Inlining {
     return 21.21F == floatConstantInline();
   }
 
+  @CheckDiscarded
   private static String stringConstantInline() {
     return "Fisk er godt";
   }
@@ -259,5 +328,12 @@ public class Inlining {
   @CheckDiscarded
   private static int onlyCalledTwice(int count) {
     return count > 0 ? count + 1 : count - 1;
+  }
+
+  @AlwaysInline
+  @CheckDiscarded
+  private static int longMethodThatWeShouldNotInline(String a, String b, String c) {
+    String result = a + b + c + b + a + c + b;
+    return result.length();
   }
 }

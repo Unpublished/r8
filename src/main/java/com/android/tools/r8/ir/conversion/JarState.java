@@ -3,7 +3,9 @@
 // BSD-style license that can be found in the LICENSE file.
 package com.android.tools.r8.ir.conversion;
 
+import com.android.tools.r8.errors.InvalidDebugInfoException;
 import com.android.tools.r8.graph.DebugLocalInfo;
+import com.android.tools.r8.utils.DescriptorUtils;
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Multimap;
@@ -35,6 +37,10 @@ public class JarState {
 
   // Type representative for the null value (non-existent but works for tracking the types here).
   public static final Type NULL_TYPE = Type.getObjectType("<null>");
+
+  // TODO(zerny): Define an internal Type wrapping ASM types so that we can define an actual value.
+  // Type representative for a value that may be either a boolean or a byte.
+  public static final Type BYTE_OR_BOOL_TYPE = null;
 
   // Typed mapping from a local slot or stack slot to a virtual register.
   public static class Slot {
@@ -78,6 +84,12 @@ public class JarState {
       assert type != REFERENCE_TYPE;
       assert type != OBJECT_TYPE;
       assert type != ARRAY_TYPE;
+      if (type == BYTE_OR_BOOL_TYPE) {
+        type = Type.BYTE_TYPE;
+      }
+      if (other == BYTE_OR_BOOL_TYPE) {
+        other = Type.BYTE_TYPE;
+      }
       int sort = type.getSort();
       int otherSort = other.getSort();
       if (isReferenceCompatible(type, other)) {
@@ -183,6 +195,9 @@ public class JarState {
 
   private final Map<Integer, Snapshot> targetStates = new HashMap<>();
 
+  // Mode denoting that the state setup is done and we are now emitting IR.
+  // Concretely we treat all remaining byte-or-bool types as bytes (no actual type can flow there).
+  private boolean building = false;
 
   public JarState(int maxLocals, Map<LocalVariableNode, DebugLocalInfo> localVariables) {
     int localsRegistersSize = maxLocals * 3;
@@ -205,13 +220,46 @@ public class JarState {
     }
   }
 
+  public void setBuilding() {
+    assert stack.isEmpty();
+    building = true;
+    for (int i = 0; i < locals.length; i++) {
+      Local local = locals[i];
+      if (local != null && local.slot.type == BYTE_OR_BOOL_TYPE) {
+        locals[i] = new Local(new Slot(local.slot.register, Type.BYTE_TYPE), local.info);
+      }
+    }
+    for (Entry<Integer, Snapshot> entry : targetStates.entrySet()) {
+      Local[] locals = entry.getValue().locals;
+      for (int i = 0; i < locals.length; i++) {
+        Local local = locals[i];
+        if (local != null && local.slot.type == BYTE_OR_BOOL_TYPE) {
+          locals[i] = new Local(new Slot(local.slot.register, Type.BYTE_TYPE), local.info);
+        }
+      }
+      ImmutableList.Builder<Slot> builder = ImmutableList.builder();
+      boolean found = false;
+      for (Slot slot : entry.getValue().stack) {
+        if (slot.type == BYTE_OR_BOOL_TYPE) {
+          found = true;
+          builder.add(new Slot(slot.register, Type.BYTE_TYPE));
+        } else {
+          builder.add(slot);
+        }
+      }
+      if (found) {
+        entry.setValue(new Snapshot(locals, builder.build()));
+      }
+    }
+  }
+
   // Local variable procedures.
 
   public List<Local> openLocals(LabelNode label) {
     Collection<LocalVariableNode> nodes = localVariableStartPoints.get(label);
     ArrayList<Local> locals = new ArrayList<>(nodes.size());
     for (LocalVariableNode node : nodes) {
-      locals.add(setLocal(node.index, Type.getType(node.desc), localVariables.get(node)));
+      locals.add(setLocalInfo(node.index, Type.getType(node.desc), localVariables.get(node)));
     }
     // Sort to ensure deterministic instruction ordering (correctness is unaffected).
     locals.sort(Comparator.comparingInt(local -> local.slot.register));
@@ -253,6 +301,10 @@ public class JarState {
 
   int getLocalRegister(int index, Type type) {
     assert index < localsSize;
+    if (type == BYTE_OR_BOOL_TYPE) {
+      assert Slot.isCategory1(type);
+      return index + localsSize;
+    }
     if (type.getSort() == Type.OBJECT || type.getSort() == Type.ARRAY) {
       return index;
     }
@@ -286,29 +338,65 @@ public class JarState {
     return local;
   }
 
+  private Local setLocalInfo(int index, Type type, DebugLocalInfo info) {
+    return setLocalInfoForRegister(getLocalRegister(index, type), info);
+  }
+
+  private Local setLocalInfoForRegister(int register, DebugLocalInfo info) {
+    Local existingLocal = getLocalForRegister(register);
+    // TODO(ager, zerny): Kotlin debug information contains locals that are not referenced.
+    // That seems broken and we currently do not retain that debug information because
+    // we do not let locals debug information influence code generation. Debug information can
+    // be completely malformed, so we shouldn't let it influence code generation. However, we
+    // need to deal with these unused locals in the debug information. For now we
+    // use a null type for the slot, but we should reconsider that.
+    Slot slot = existingLocal != null ? existingLocal.slot : new Slot(register, null);
+    Local local = new Local(slot, info);
+    locals[register] = local;
+    return local;
+  }
+
+
   public int writeLocal(int index, Type type) {
-    assert type != null;
+    assert nonNullType(type);
     Local local = getLocal(index, type);
-    assert local == null || local.info == null || local.slot.isCompatibleWith(type);
+    if (local != null && local.info != null && !local.slot.isCompatibleWith(type)) {
+      throw new InvalidDebugInfoException(
+          "Attempt to write value of type " + prettyType(type) + " to local " + local.info);
+    }
     // We cannot assume consistency for writes because we do not have complete information about the
     // scopes of locals. We assume the program to be verified and overwrite if the types mismatch.
-    if (local == null || (local.info == null && !local.slot.type.equals(type))) {
-      local = setLocal(index, type, null);
+    if (local == null || !typeEquals(local.slot.type, type)) {
+      DebugLocalInfo info = local == null ? null : local.info;
+      local = setLocal(index, type, info);
     }
     return local.slot.register;
+  }
+
+  public boolean typeEquals(Type type1, Type type2) {
+    return (type1 == BYTE_OR_BOOL_TYPE && type2 == BYTE_OR_BOOL_TYPE)
+        || (type1 != null && type1.equals(type2));
   }
 
   public Slot readLocal(int index, Type type) {
     Local local = getLocal(index, type);
     assert local != null;
+    if (local.info != null && !local.slot.isCompatibleWith(type)) {
+      throw new InvalidDebugInfoException(
+          "Attempt to read value of type " + prettyType(type) + " from local " + local.info);
+    }
     assert local.slot.isCompatibleWith(type);
     return local.slot;
+  }
+
+  public boolean nonNullType(Type type) {
+    return type != null || !building;
   }
 
   // Stack procedures.
 
   public int push(Type type) {
-    assert type != null;
+    assert nonNullType(type);
     int top = topOfStack;
     // For simplicity, every stack slot (and local variable) is wide (uses two registers).
     topOfStack += 2;
@@ -332,14 +420,19 @@ public class JarState {
     // For simplicity, every stack slot (and local variable) is wide (uses two registers).
     topOfStack -= 2;
     Slot slot = stack.pop();
-    assert slot.type != null;
+    assert nonNullType(slot.type);
     assert slot.register == topOfStack;
     return slot;
   }
 
   public Slot pop(Type type) {
     Slot slot = pop();
-    assert slot.isCompatibleWith(type);
+    boolean compatible = slot.isCompatibleWith(type);
+    if (!compatible && !localVariables.isEmpty()) {
+      throw new InvalidDebugInfoException("Expected to read stack value of type " + prettyType(type)
+          + " but found value of type " + prettyType(slot.type));
+    }
+    assert compatible;
     return slot;
   }
 
@@ -416,13 +509,17 @@ public class JarState {
     return true;
   }
 
+  private boolean isRefinement(Type current, Type other) {
+    return (current == JarState.NULL_TYPE && other != JarState.NULL_TYPE)
+        || (current == JarState.BYTE_OR_BOOL_TYPE && other != JarState.BYTE_OR_BOOL_TYPE);
+  }
+
   private ImmutableList<Slot> mergeStacks(
       ImmutableList<Slot> currentStack, ImmutableList<Slot> newStack) {
     assert currentStack.size() == newStack.size();
     List<Slot> mergedStack = null;
     for (int i = 0; i < currentStack.size(); i++) {
-      if (currentStack.get(i).type == JarState.NULL_TYPE &&
-          newStack.get(i).type != JarState.NULL_TYPE) {
+      if (isRefinement(currentStack.get(i).type, newStack.get(i).type)) {
         if (mergedStack == null) {
           mergedStack = new ArrayList<>();
           mergedStack.addAll(currentStack.subList(0, i));
@@ -448,8 +545,7 @@ public class JarState {
       // If this assert triggers we can get different debug information for the same local
       // on different control-flow paths and we will have to merge them.
       assert currentLocal.info == newLocal.info;
-      if (currentLocal.slot.type == JarState.NULL_TYPE &&
-          newLocal.slot.type != JarState.NULL_TYPE) {
+      if (isRefinement(currentLocal.slot.type, newLocal.slot.type)) {
         if (mergedLocals == null) {
           mergedLocals = new Local[currentLocals.length];
           System.arraycopy(currentLocals, 0, mergedLocals, 0, i);
@@ -461,15 +557,6 @@ public class JarState {
       }
     }
     return mergedLocals != null ? mergedLocals : currentLocals;
-  }
-
-  private static boolean verifyStack(List<Slot> stack, List<Slot> other) {
-    assert stack.size() == other.size();
-    int i = 0;
-    for (Slot slot : stack) {
-      assert slot.isCompatibleWith(other.get(i++).type);
-    }
-    return true;
   }
 
   // Other helpers.
@@ -490,7 +577,11 @@ public class JarState {
   public static String stackToString(Collection<Slot> stack) {
     List<String> strings = new ArrayList<>(stack.size());
     for (Slot slot : stack) {
-      strings.add(slot.type.toString());
+      if (slot.type == BYTE_OR_BOOL_TYPE) {
+        strings.add("<byte|bool>");
+      } else {
+        strings.add(slot.type.toString());
+      }
     }
     StringBuilder builder = new StringBuilder("{ ");
     for (int i = strings.size() - 1; i >= 0; i--) {
@@ -516,11 +607,26 @@ public class JarState {
         builder.append("_");
       } else if (local.info != null) {
         builder.append(local.info);
+      } else if (local.slot.type == BYTE_OR_BOOL_TYPE) {
+        builder.append("<byte|bool>");
       } else {
         builder.append(local.slot.type.toString());
       }
     }
     builder.append(" }");
     return builder.toString();
+  }
+
+  private String prettyType(Type type) {
+    if (type == BYTE_OR_BOOL_TYPE) {
+      return "<byte|bool>";
+    }
+    if (type == ARRAY_TYPE) {
+      return type.getElementType().getInternalName();
+    }
+    if (type == REFERENCE_TYPE || type == OBJECT_TYPE || type == NULL_TYPE) {
+      return type.getInternalName();
+    }
+    return DescriptorUtils.descriptorToJavaType(type.getDescriptor());
   }
 }

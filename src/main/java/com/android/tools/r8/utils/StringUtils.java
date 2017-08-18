@@ -12,6 +12,8 @@ import java.util.function.Function;
 
 public class StringUtils {
 
+  public final static String LINE_SEPARATOR = System.getProperty("line.separator");
+
   private final static char[] IDENTIFIER_LETTERS
       = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_".toCharArray();
   private final static int NUMBER_OF_LETTERS = IDENTIFIER_LETTERS.length;
@@ -122,6 +124,18 @@ public class StringUtils {
     return builder.toString();
   }
 
+  public static String lines(String... lines) {
+    StringBuilder builder = new StringBuilder();
+    for (String line : lines) {
+      builder.append(line).append(LINE_SEPARATOR);
+    }
+    return builder.toString();
+  }
+
+  public static String joinLines(String... lines) {
+    return join(LINE_SEPARATOR, lines);
+  }
+
   public static String zeroPrefix(int i, int width) {
     return zeroPrefixString(Integer.toString(i), width);
   }
@@ -144,11 +158,11 @@ public class StringUtils {
     assert(0 <= width && width <= 8);
     String hex = Integer.toHexString(value);
     if (value >= 0) {
-      return zeroPrefixString(hex, width);
+      return "0x" + zeroPrefixString(hex, width);
     } else {
       // Negative ints are always formatted as 8 characters.
       assert(hex.length() == 8);
-      return hex;
+      return "0x" + hex;
     }
   }
 
@@ -156,11 +170,11 @@ public class StringUtils {
     assert(0 <= width && width <= 16);
     String hex = Long.toHexString(value);
     if (value >= 0) {
-      return zeroPrefixString(hex, width);
+      return "0x" + zeroPrefixString(hex, width);
     } else {
       // Negative longs are always formatted as 16 characters.
       assert(hex.length() == 16);
-      return hex;
+      return "0x" + hex;
     }
   }
 

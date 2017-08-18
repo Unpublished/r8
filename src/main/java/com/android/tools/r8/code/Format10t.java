@@ -10,7 +10,7 @@ import java.nio.ShortBuffer;
 
 abstract class Format10t extends Base1Format {
 
-  public final /* offset */ int AA;
+  public /* offset */ byte AA;
 
   // +AA | op
   Format10t(int high, BytecodeStream stream) {
@@ -21,7 +21,7 @@ abstract class Format10t extends Base1Format {
 
   protected Format10t(int AA) {
     assert Byte.MIN_VALUE <= AA && AA <= Byte.MAX_VALUE;
-    this.AA = AA;
+    this.AA = (byte) AA;
   }
 
   public void write(ShortBuffer dest, ObjectToOffsetMapping mapping) {
@@ -40,8 +40,7 @@ abstract class Format10t extends Base1Format {
   }
 
   public String toString(ClassNameMapper naming) {
-    String relative = AA >= 0 ? ("+" + AA) : Integer.toString(AA);
-    return formatString(relative + " (" + (getOffset() + AA) + ")");
+    return formatString(formatRelativeOffset(AA));
   }
 
   public String toSmaliString(ClassNameMapper naming) {

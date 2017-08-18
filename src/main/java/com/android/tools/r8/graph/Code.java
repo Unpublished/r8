@@ -11,7 +11,7 @@ import com.android.tools.r8.ir.optimize.Outliner.OutlineCode;
 import com.android.tools.r8.naming.ClassNameMapper;
 import com.android.tools.r8.utils.InternalOptions;
 
-public abstract class Code extends CanonicalizedDexItem {
+public abstract class Code extends CachedHashValueDexItem {
 
   public abstract IRCode buildIR(DexEncodedMethod encodedMethod, InternalOptions options);
 
@@ -31,6 +31,10 @@ public abstract class Code extends CanonicalizedDexItem {
 
   public boolean isOutlineCode() {
     return false;
+  }
+
+  public int estimatedSizeForInlining() {
+    return Integer.MAX_VALUE;
   }
 
   public DexCode asDexCode() {

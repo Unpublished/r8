@@ -363,7 +363,7 @@ public class IRCode {
       }
     }
     assert arguments.size()
-        == method.method.proto.parameters.values.length + (method.accessFlags.isStatic() ? 0 : 1);
+        == method.method.getArity() + (method.accessFlags.isStatic() ? 0 : 1);
     return arguments;
   }
 
@@ -389,5 +389,10 @@ public class IRCode {
 
   public final int getHighestBlockNumber() {
     return blocks.stream().max(Comparator.comparingInt(BasicBlock::getNumber)).get().getNumber();
+  }
+
+  public Instruction createConstNull(Instruction from) {
+    Value newValue = createValue(from.outType());
+    return new ConstNumber(ConstType.fromMoveType(from.outType()), newValue, 0);
   }
 }

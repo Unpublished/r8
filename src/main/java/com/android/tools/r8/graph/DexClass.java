@@ -7,9 +7,7 @@ import com.android.tools.r8.Resource;
 import com.android.tools.r8.dex.MixedSectionCollection;
 import com.android.tools.r8.errors.CompilationError;
 import com.android.tools.r8.errors.Unreachable;
-
 import com.google.common.base.MoreObjects;
-
 import java.util.Arrays;
 import java.util.function.Consumer;
 
@@ -24,10 +22,10 @@ public abstract class DexClass extends DexItem {
   public DexType superType;
   public DexTypeList interfaces;
   public final DexString sourceFile;
-  public DexEncodedField[] staticFields;
-  public DexEncodedField[] instanceFields;
-  public DexEncodedMethod[] directMethods;
-  public DexEncodedMethod[] virtualMethods;
+  protected DexEncodedField[] staticFields;
+  protected DexEncodedField[] instanceFields;
+  protected DexEncodedMethod[] directMethods;
+  protected DexEncodedMethod[] virtualMethods;
   public DexAnnotationSet annotations;
 
   public DexClass(
@@ -41,10 +39,10 @@ public abstract class DexClass extends DexItem {
     this.accessFlags = accessFlags;
     this.superType = superType;
     this.type = type;
-    this.staticFields = staticFields;
-    this.instanceFields = instanceFields;
-    this.directMethods = directMethods;
-    this.virtualMethods = virtualMethods;
+    setStaticFields(staticFields);
+    setInstanceFields(instanceFields);
+    setDirectMethods(directMethods);
+    setVirtualMethods(virtualMethods);
     this.annotations = annotations;
     if (type == superType) {
       throw new CompilationError("Class " + type.toString() + " cannot extend itself");
@@ -68,12 +66,21 @@ public abstract class DexClass extends DexItem {
   }
 
   public DexEncodedMethod[] directMethods() {
-    return MoreObjects.firstNonNull(directMethods, NO_METHODS);
+    return directMethods;
+  }
+
+  public void setDirectMethods(DexEncodedMethod[] values) {
+    directMethods = MoreObjects.firstNonNull(values, NO_METHODS);
   }
 
   public DexEncodedMethod[] virtualMethods() {
-    return MoreObjects.firstNonNull(virtualMethods, NO_METHODS);
+    return virtualMethods;
   }
+
+  public void setVirtualMethods(DexEncodedMethod[] values) {
+    virtualMethods = MoreObjects.firstNonNull(values, NO_METHODS);
+  }
+
 
   public void forEachMethod(Consumer<DexEncodedMethod> consumer) {
     for (DexEncodedMethod method : directMethods()) {
@@ -105,11 +112,19 @@ public abstract class DexClass extends DexItem {
   }
 
   public DexEncodedField[] staticFields() {
-    return MoreObjects.firstNonNull(staticFields, NO_FIELDS);
+    return staticFields;
+  }
+
+  public void setStaticFields(DexEncodedField[] values) {
+    staticFields = MoreObjects.firstNonNull(values, NO_FIELDS);
   }
 
   public DexEncodedField[] instanceFields() {
-    return MoreObjects.firstNonNull(instanceFields, NO_FIELDS);
+    return instanceFields;
+  }
+
+  public void setInstanceFields(DexEncodedField[] values) {
+    instanceFields = MoreObjects.firstNonNull(values, NO_FIELDS);
   }
 
   /**
@@ -177,12 +192,8 @@ public abstract class DexClass extends DexItem {
   }
 
   public DexEncodedMethod getClassInitializer() {
-    for (DexEncodedMethod method : directMethods()) {
-      if (method.accessFlags.isConstructor() && method.accessFlags.isStatic()) {
-        return method;
-      }
-    }
-    return null;
+    return Arrays.stream(directMethods()).filter(DexEncodedMethod::isClassInitializer).findAny()
+        .orElse(null);
   }
 
   public Resource.Kind getOrigin() {
@@ -192,6 +203,14 @@ public abstract class DexClass extends DexItem {
   public boolean hasClassInitializer() {
     return getClassInitializer() != null;
   }
+
+  public boolean hasTrivialClassInitializer() {
+    DexEncodedMethod clinit = getClassInitializer();
+    return clinit != null
+        && clinit.getCode() != null
+        && clinit.getCode().asDexCode().isEmptyVoidMethod();
+  }
+
 
   public boolean hasNonTrivialClassInitializer() {
     DexEncodedMethod clinit = getClassInitializer();
@@ -203,5 +222,10 @@ public abstract class DexClass extends DexItem {
     }
     // For non-dex code we don't try to check the code.
     return true;
+  }
+
+  public boolean defaultValuesForStaticFieldsMayTriggerAllocation() {
+    return Arrays.stream(staticFields())
+        .anyMatch(field -> !field.staticValue.mayTriggerAllocation());
   }
 }

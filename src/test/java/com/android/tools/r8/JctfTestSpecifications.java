@@ -18,6 +18,7 @@ import com.android.tools.r8.ToolHelper.DexVm;
 import com.google.common.collect.ImmutableListMultimap;
 import com.google.common.collect.Multimap;
 import java.util.Collection;
+import java.util.function.BiFunction;
 
 public class JctfTestSpecifications {
 
@@ -4655,14 +4656,6 @@ public class JctfTestSpecifications {
           // 1) t04
           // java.lang.AssertionError
 
-          .put("lang.reflect.Field.getLjava_lang_Object.Field_get_A04", match(R8_AFTER_D8_COMPILER))
-          // 1) t02
-          // java.lang.AssertionError: expected:<9223372036854775807> but was:<72057594037927935>
-
-          .put("lang.reflect.Field.getLongLjava_lang_Object.Field_getLong_A04", match(R8_AFTER_D8_COMPILER))
-          // 1)
-          // java.lang.AssertionError: expected:<9223372036854775807> but was:<72057594037927935>
-
           .build(); // end of failuresToTriage
 
   public static final Multimap<String, TestCondition> flakyWithArt =
@@ -4808,6 +4801,20 @@ public class JctfTestSpecifications {
           .put("lang.RuntimePermission.Class.RuntimePermission_class_A13", any())
           .build(); // end of timeoutsWithArt
 
+  public static final Multimap<String, TestCondition> requiresInliningDisabled =
+      new ImmutableListMultimap.Builder<String, TestCondition>()
+          .put("lang.Throwable.printStackTrace.Throwable_printStackTrace_A01", match(R8_COMPILER))
+          .put("lang.Throwable.printStackTraceLjava_io_PrintWriter.Throwable_printStackTrace_A01",
+              match(R8_COMPILER))
+          .put("lang.Throwable.printStackTraceLjava_io_PrintStream.Throwable_printStackTrace_A01",
+              match(R8_COMPILER))
+          .put("lang.ref.SoftReference.isEnqueued.SoftReference_isEnqueued_A01", match(R8_COMPILER))
+          .put("lang.ref.WeakReference.isEnqueued.WeakReference_isEnqueued_A01", match(R8_COMPILER))
+          .put("lang.StackTraceElement.getMethodName.StackTraceElement_getMethodName_A01",
+              match(R8_COMPILER))
+          .put("lang.Thread.dumpStack.Thread_dumpStack_A01", match(R8_COMPILER))
+          .build();
+
   private static final boolean testMatch(
       Multimap<String, TestCondition> testConditions,
       String name,
@@ -4823,11 +4830,12 @@ public class JctfTestSpecifications {
     return false;
   }
 
-  public static final Outcome getExpectedOutcome(
+  public static final <T> T getExpectedOutcome(
       String name,
       CompilerUnderTest compilerUnderTest,
       DexVm dexVm,
-      CompilationMode compilationMode) {
+      CompilationMode compilationMode,
+      BiFunction<Outcome, Boolean, T> consumer) {
 
     Outcome outcome = null;
 
@@ -4842,6 +4850,11 @@ public class JctfTestSpecifications {
       assert outcome == null;
       outcome = Outcome.FLAKY_WITH_ART;
     }
-    return outcome == null ? Outcome.PASSES : outcome;
+    if (outcome == null) {
+      outcome = Outcome.PASSES;
+    }
+    boolean disableInlining = testMatch(requiresInliningDisabled, name, compilerUnderTest, dexVm,
+        compilationMode);
+    return consumer.apply(outcome, disableInlining);
   }
 }

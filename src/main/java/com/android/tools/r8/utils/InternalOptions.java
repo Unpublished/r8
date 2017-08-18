@@ -4,13 +4,14 @@
 package com.android.tools.r8.utils;
 
 import com.android.tools.r8.dex.Constants;
+import com.android.tools.r8.dex.Marker;
 import com.android.tools.r8.errors.CompilationError;
+import com.android.tools.r8.errors.InvalidDebugInfoException;
 import com.android.tools.r8.graph.DexEncodedMethod;
 import com.android.tools.r8.graph.DexItemFactory;
+import com.android.tools.r8.shaking.ProguardConfiguration;
 import com.android.tools.r8.shaking.ProguardConfigurationRule;
-import com.android.tools.r8.shaking.ProguardTypeMatcher;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableSet;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.function.Function;
@@ -18,14 +19,26 @@ import java.util.function.Function;
 public class InternalOptions {
 
   public final DexItemFactory itemFactory;
+  public final ProguardConfiguration proguardConfiguration;
 
+  // Constructor for testing and/or other utilities.
   public InternalOptions() {
     itemFactory = new DexItemFactory();
+    proguardConfiguration = ProguardConfiguration.defaultConfiguration(itemFactory);
   }
 
+  // Constructor for D8.
   public InternalOptions(DexItemFactory factory) {
     assert factory != null;
     itemFactory = factory;
+    proguardConfiguration = ProguardConfiguration.defaultConfiguration(itemFactory);
+  }
+
+  // Constructor for R8.
+  public InternalOptions(ProguardConfiguration proguardConfiguration) {
+    assert proguardConfiguration != null;
+    this.proguardConfiguration = proguardConfiguration;
+    itemFactory = proguardConfiguration.getDexItemFactory();
   }
 
   public final int NOT_SPECIFIED = -1;
@@ -45,8 +58,28 @@ public class InternalOptions {
   // Silencing output.
   public boolean quiet = false;
 
+  // Hidden marker for classes.dex
+  private boolean hasMarker = false;
+  private Marker marker;
+
+  public boolean hasMarker() {
+    return hasMarker;
+  }
+
+  public void setMarker(Marker marker) {
+    this.hasMarker = true;
+    this.marker = marker;
+  }
+
+  public Marker getMarker() {
+    assert hasMarker();
+    return marker;
+  }
+
   public List<String> methodsFilter = ImmutableList.of();
   public int minApiLevel = Constants.DEFAULT_ANDROID_API;
+  // Skipping min_api check and compiling an intermediate result intended for later merging.
+  public boolean intermediate = false;
   public List<String> logArgumentsFilter = ImmutableList.of();
 
   // Defines interface method rewriter behavior.
@@ -58,21 +91,12 @@ public class InternalOptions {
   public OutputMode outputMode = OutputMode.Indexed;
 
   public boolean useTreeShaking = true;
-  public boolean printUsage = false;
-  public Path printUsageFile = null;
 
   public boolean printCfg = false;
   public String printCfgFile;
-  public boolean printSeeds;
-  public Path seedsFile;
-  public boolean printMapping;
-  public Path printMappingFile;
-  public boolean printMainDexList;
   public Path printMainDexListFile;
   public boolean ignoreMissingClasses = false;
   public boolean skipMinification = false;
-  public String packagePrefix = "";
-  public boolean allowAccessModification = true;
   public boolean inlineAccessors = true;
   public boolean removeSwitchMaps = true;
   public boolean disableAssertions = true;
@@ -82,24 +106,47 @@ public class InternalOptions {
   public boolean allowParameterName = false;
 
   public boolean debug = false;
+  public boolean singleStepDebug = false;
   public final TestingOptions testing = new TestingOptions();
-
-  // TODO(zerny): These stateful dictionaries do not belong here.
-  public List<String> classObfuscationDictionary = ImmutableList.of();
-  public List<String> obfuscationDictionary = ImmutableList.of();
 
   public ImmutableList<ProguardConfigurationRule> mainDexKeepRules = ImmutableList.of();
   public boolean minimalMainDex;
-  public ImmutableList<ProguardConfigurationRule> keepRules = ImmutableList.of();
-  public ImmutableSet<ProguardTypeMatcher> dontWarnPatterns = ImmutableSet.of();
 
   public String warningInvalidParameterAnnotations = null;
 
+  public boolean warningMissingEnclosingMember = false;
+
+  public int warningInvalidDebugInfoCount = 0;
+
+  public void warningInvalidDebugInfo(DexEncodedMethod method, InvalidDebugInfoException e) {
+    warningInvalidDebugInfoCount++;
+  }
+
   public boolean printWarnings() {
     boolean printed = false;
+    boolean printOutdatedToolchain = false;
     if (warningInvalidParameterAnnotations != null) {
       System.out.println("Warning: " + warningInvalidParameterAnnotations);
       printed = true;
+    }
+    if (warningInvalidDebugInfoCount > 0) {
+      System.out.println("Warning: stripped invalid locals information from "
+          + warningInvalidDebugInfoCount
+          + (warningInvalidDebugInfoCount == 1 ? " method." : " methods."));
+      printed = true;
+      printOutdatedToolchain = true;
+    }
+    if (warningMissingEnclosingMember) {
+      System.out.println(
+          "Warning: InnerClass annotations are missing corresponding EnclosingMember annotations."
+              + " Such InnerClass annotations are ignored.");
+      printed = true;
+      printOutdatedToolchain = true;
+    }
+    if (printOutdatedToolchain) {
+      System.out.println(
+          "Some warnings are typically a sign of using an outdated Java toolchain."
+              + " To fix, recompile the source with an updated toolchain.");
     }
     return printed;
   }
@@ -128,6 +175,15 @@ public class InternalOptions {
     return logArgumentsFilter.indexOf(qualifiedName) >= 0;
   }
 
+  public enum PackageObfuscationMode {
+    // General package obfuscation.
+    NONE,
+    // Repackaging all classes into the single user-given (or top-level) package.
+    REPACKAGE,
+    // Repackaging all packages into the single user-given (or top-level) package.
+    FLATTEN
+  }
+
   public static class OutlineOptions {
 
     public boolean enabled = true;
@@ -139,7 +195,9 @@ public class InternalOptions {
   }
 
   public static class TestingOptions {
-    public Function<List<DexEncodedMethod>, List<DexEncodedMethod>> irOrdering;
+
+    public Function<List<DexEncodedMethod>, List<DexEncodedMethod>> irOrdering =
+        Function.identity();
   }
 
   public static class AttributeRemovalOptions {
@@ -273,16 +331,20 @@ public class InternalOptions {
     return minApiLevel >= Constants.ANDROID_N_API;
   }
 
+  public boolean canUsePrivateInterfaceMethods() {
+    return minApiLevel >= Constants.ANDROID_N_API;
+  }
+
+  public boolean canUseMultidex() {
+    return intermediate || minApiLevel >= Constants.ANDROID_L_API;
+  }
+
   public boolean canUseLongCompareAndObjectsNonNull() {
     return minApiLevel >= Constants.ANDROID_K_API;
   }
 
   public boolean canUseSuppressedExceptions() {
     return minApiLevel >= Constants.ANDROID_K_API;
-  }
-
-  public boolean canUsePrivateInterfaceMethods() {
-    return minApiLevel >= Constants.ANDROID_N_API;
   }
 
   // APIs for accessing parameter names annotations are not available before Android O, thus does

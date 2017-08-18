@@ -4,6 +4,7 @@
 package com.android.tools.r8.graph;
 
 import com.android.tools.r8.dex.Constants;
+import com.android.tools.r8.dex.Marker;
 import com.android.tools.r8.graph.DexDebugEvent.AdvanceLine;
 import com.android.tools.r8.graph.DexDebugEvent.AdvancePC;
 import com.android.tools.r8.graph.DexDebugEvent.Default;
@@ -23,17 +24,19 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
 public class DexItemFactory {
 
-  private final Map<String, DexString> strings = new HashMap<>();
-  private final Map<DexType, DexType> types = new HashMap<>();
-  private final Map<DexField, DexField> fields = new HashMap<>();
-  private final Map<DexProto, DexProto> protos = new HashMap<>();
-  private final Map<DexMethod, DexMethod> methods = new HashMap<>();
-  private final Map<DexCallSite, DexCallSite> callSites = new HashMap<>();
-  private final Map<DexMethodHandle, DexMethodHandle> methodHandles = new HashMap<>();
+  private final ConcurrentHashMap<DexString, DexString> strings = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<DexString, DexType> types = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<DexField, DexField> fields = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<DexProto, DexProto> protos = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<DexMethod, DexMethod> methods = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<DexCallSite, DexCallSite> callSites = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<DexMethodHandle, DexMethodHandle> methodHandles =
+      new ConcurrentHashMap<>();
 
   // DexDebugEvent Canonicalization.
   private final Int2ObjectMap<AdvanceLine> advanceLines = new Int2ObjectOpenHashMap<>();
@@ -84,9 +87,12 @@ public class DexItemFactory {
   public final DexString getClassMethodName = createString("getClass");
   public final DexString ordinalMethodName = createString("ordinal");
   public final DexString desiredAssertionStatusMethodName = createString("desiredAssertionStatus");
+  public final DexString getNameName = createString("getName");
+  public final DexString getSimpleNameName = createString("getSimpleName");
   public final DexString assertionsDisabled = createString("$assertionsDisabled");
 
   public final DexString stringDescriptor = createString("Ljava/lang/String;");
+  public final DexString stringArrayDescriptor = createString("[Ljava/lang/String;");
   public final DexString objectDescriptor = createString("Ljava/lang/Object;");
   public final DexString classDescriptor = createString("Ljava/lang/Class;");
   public final DexString enumDescriptor = createString("Ljava/lang/Enum;");
@@ -124,6 +130,7 @@ public class DexItemFactory {
   public final DexType boxedNumberType = createType(boxedNumberDescriptor);
 
   public final DexType stringType = createType(stringDescriptor);
+  public final DexType stringArrayType = createType(stringArrayDescriptor);
   public final DexType objectType = createType(objectDescriptor);
   public final DexType enumType = createType(enumDescriptor);
   public final DexType annotationType = createType(annotationDescriptor);
@@ -205,10 +212,15 @@ public class DexItemFactory {
   public class ClassMethods {
 
     public DexMethod desiredAssertionStatus;
+    public DexMethod getName;
+    public DexMethod getSimpleName;
 
     private ClassMethods() {
       desiredAssertionStatus = createMethod(classDescriptor,
           desiredAssertionStatusMethodName, booleanDescriptor, DexString.EMPTY_ARRAY);
+      getName = createMethod(classDescriptor, getNameName, stringDescriptor, DexString.EMPTY_ARRAY);
+      getSimpleName = createMethod(classDescriptor,
+          getSimpleNameName, stringDescriptor, DexString.EMPTY_ARRAY);
     }
   }
 
@@ -270,32 +282,45 @@ public class DexItemFactory {
     }
   }
 
-  synchronized private static <T extends DexItem> T canonicalize(Map<T, T> map, T item) {
+  private static <T extends DexItem> T canonicalize(ConcurrentHashMap<T, T> map, T item) {
     assert item != null;
     assert !internalSentinels.contains(item);
     T previous = map.putIfAbsent(item, item);
     return previous == null ? item : previous;
   }
 
-  synchronized private DexString canonicalizeString(String key) {
-    assert key != null;
-    return strings.computeIfAbsent(key, DexString::new);
-  }
-
   public DexString createString(int size, byte[] content) {
     assert !sorted;
-    return canonicalizeString(new DexString(size, content).toString());
+    return canonicalize(strings, new DexString(size, content));
   }
 
   public DexString createString(String source) {
     assert !sorted;
-    return canonicalizeString(source);
+    return canonicalize(strings, new DexString(source));
   }
 
-  public DexType createType(DexString descriptor) {
+  // Debugging support to extract marking string.
+  synchronized public Marker extractMarker() {
+    // This is slow but it is not needed for any production code yet.
+    for (DexString dexString : strings.keySet()) {
+      Marker result = Marker.parse(dexString.toString());
+      if (result != null) {
+        return result;
+      }
+    }
+    return null;
+  }
+
+  synchronized public DexType createType(DexString descriptor) {
     assert !sorted;
-    DexType type = new DexType(descriptor);
-    return canonicalize(types, type);
+    assert descriptor != null;
+    DexType result = types.get(descriptor);
+    if (result == null) {
+      result = new DexType(descriptor);
+      assert !internalSentinels.contains(result);
+      types.put(descriptor, result);
+    }
+    return result;
   }
 
   public DexType createType(String descriptor) {

@@ -14,18 +14,25 @@ import com.android.tools.r8.graph.DexProgramClass;
 import com.android.tools.r8.graph.DexType;
 import com.android.tools.r8.graph.GraphLense;
 import com.android.tools.r8.graph.UseRegistry;
-import com.android.tools.r8.ir.code.Invoke;
 import com.android.tools.r8.ir.code.Invoke.Type;
 import com.android.tools.r8.shaking.Enqueuer.AppInfoWithLiveness;
+import com.android.tools.r8.utils.InternalOptions;
+import com.android.tools.r8.utils.ThreadUtils;
 import com.google.common.collect.Sets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
@@ -44,6 +51,10 @@ import java.util.stream.Collectors;
  * Recursive calls are not present.
  */
 public class CallGraph {
+
+  private CallGraph(InternalOptions options) {
+    this.shuffle = options.testing.irOrdering;
+  }
 
   private static class Node {
 
@@ -121,6 +132,7 @@ public class CallGraph {
 
   private final Map<DexEncodedMethod, Node> nodes = new LinkedHashMap<>();
   private final Map<DexEncodedMethod, Set<DexEncodedMethod>> breakers = new HashMap<>();
+  private final Function<List<DexEncodedMethod>, List<DexEncodedMethod>> shuffle;
 
   // Returns whether the method->callee edge has been removed from the call graph
   // to break a cycle in the call graph.
@@ -133,8 +145,8 @@ public class CallGraph {
   private Set<DexEncodedMethod> doubleCallSite = Sets.newIdentityHashSet();
 
   public static CallGraph build(DexApplication application, AppInfoWithSubtyping appInfo,
-      GraphLense graphLense) {
-    CallGraph graph = new CallGraph();
+      GraphLense graphLense, InternalOptions options) {
+    CallGraph graph = new CallGraph(options);
     DexClass[] classes = application.classes().toArray(new DexClass[application.classes().size()]);
     Arrays.sort(classes, (DexClass a, DexClass b) -> a.type.slowCompareTo(b.type));
     for (DexClass clazz : classes) {
@@ -185,7 +197,9 @@ public class CallGraph {
 
   private static boolean allMethodsExists(DexApplication application, CallGraph graph) {
     for (DexProgramClass clazz : application.classes()) {
-      clazz.forEachMethod(method -> { assert graph.nodes.get(method) != null; });
+      clazz.forEachMethod(method -> {
+        assert graph.nodes.get(method) != null;
+      });
     }
     return true;
   }
@@ -197,19 +211,19 @@ public class CallGraph {
    * Please note that there are no cycles in this graph (see {@link #breakCycles}).
    * <p>
    *
-   * @return  List of {@link DexEncodedMethod}.
+   * @return List of {@link DexEncodedMethod}.
    */
-  List<DexEncodedMethod> extractLeaves() {
+  private List<DexEncodedMethod> extractLeaves() {
     if (isEmpty()) {
-      return null;
+      return Collections.emptyList();
     }
     // First identify all leaves before removing them from the graph.
     List<Node> leaves = nodes.values().stream().filter(Node::isLeaf).collect(Collectors.toList());
-    leaves.forEach( leaf -> {
-      leaf.callers.forEach( caller -> caller.callees.remove(leaf));
+    leaves.forEach(leaf -> {
+      leaf.callers.forEach(caller -> caller.callees.remove(leaf));
       nodes.remove(leaf.method);
     });
-    return leaves.stream().map( leaf -> leaf.method).collect(Collectors.toList());
+    return shuffle.apply(leaves.stream().map(leaf -> leaf.method).collect(Collectors.toList()));
   }
 
   private int traverse(Node node, Set<Node> stack, Set<Node> marked) {
@@ -253,7 +267,7 @@ public class CallGraph {
     int numberOfCycles = 0;
     Set<Node> stack = Sets.newIdentityHashSet();
     Set<Node> marked = Sets.newIdentityHashSet();
-    for(Node node : nodes.values()) {
+    for (Node node : nodes.values()) {
       numberOfCycles += traverse(node, stack, marked);
     }
     return numberOfCycles;
@@ -279,6 +293,21 @@ public class CallGraph {
     return nodes.size() == 0;
   }
 
+  public void forEachMethod(Consumer<DexEncodedMethod> consumer, ExecutorService executorService)
+      throws ExecutionException {
+    while (!isEmpty()) {
+      List<DexEncodedMethod> methods = extractLeaves();
+      assert methods.size() > 0;
+      List<Future<?>> futures = new ArrayList<>();
+      for (DexEncodedMethod method : methods) {
+        futures.add(executorService.submit(() -> {
+          consumer.accept(method);
+        }));
+      }
+      ThreadUtils.awaitFutures(futures);
+    }
+  }
+
   public void dump() {
     nodes.forEach((m, n) -> System.out.println(n + "\n"));
   }
@@ -298,16 +327,57 @@ public class CallGraph {
       this.graph = graph;
     }
 
-    private void processInvoke(DexEncodedMethod source, Invoke.Type type, DexMethod method) {
+    private void addClassInitializerTarget(DexClass clazz) {
+      assert clazz != null;
+      if (clazz.hasClassInitializer() && !clazz.isLibraryClass()) {
+        DexEncodedMethod possibleTarget = clazz.getClassInitializer();
+        addTarget(possibleTarget);
+      }
+    }
+
+    private void addClassInitializerTarget(DexType type) {
+      if (type.isArrayType()) {
+        type = type.toBaseType(appInfo.dexItemFactory);
+      }
+      DexClass clazz = appInfo.definitionFor(type);
+      if (clazz != null) {
+        addClassInitializerTarget(clazz);
+      }
+    }
+
+    private void addTarget(DexEncodedMethod target) {
+      Node callee = graph.ensureMethodNode(target);
+      graph.addCall(caller, callee);
+    }
+
+    private void addPossibleTarget(DexEncodedMethod possibleTarget) {
+      DexClass possibleTargetClass =
+          appInfo.definitionFor(possibleTarget.method.getHolder());
+      if (possibleTargetClass != null && !possibleTargetClass.isLibraryClass()) {
+        addTarget(possibleTarget);
+      }
+    }
+
+    private void addPossibleTargets(
+        DexEncodedMethod definition, Set<DexEncodedMethod> possibleTargets) {
+      for (DexEncodedMethod possibleTarget : possibleTargets) {
+        if (possibleTarget != definition) {
+          addPossibleTarget(possibleTarget);
+        }
+      }
+    }
+
+    private void processInvoke(Type type, DexMethod method) {
+      DexEncodedMethod source = caller.method;
       method = graphLense.lookupMethod(method, source);
       DexEncodedMethod definition = appInfo.lookup(type, method);
       if (definition != null) {
         assert !source.accessFlags.isBridge() || definition != caller.method;
-        DexType definitionHolder = definition.method.getHolder();
-        assert definitionHolder.isClassType();
-        if (!appInfo.definitionFor(definitionHolder).isLibraryClass()) {
-          Node callee = graph.ensureMethodNode(definition);
-          graph.addCall(caller, callee);
+        DexClass definitionHolder = appInfo.definitionFor(definition.method.getHolder());
+        assert definitionHolder != null;
+        if (!definitionHolder.isLibraryClass()) {
+          addClassInitializerTarget(definitionHolder);
+          addTarget(definition);
           // For virtual and interface calls add all potential targets that could be called.
           if (type == Type.VIRTUAL || type == Type.INTERFACE) {
             Set<DexEncodedMethod> possibleTargets;
@@ -316,73 +386,74 @@ public class CallGraph {
             } else {
               possibleTargets = appInfo.lookupVirtualTargets(definition.method);
             }
-            for (DexEncodedMethod possibleTarget : possibleTargets) {
-              if (possibleTarget != definition) {
-                DexClass possibleTargetClass =
-                    appInfo.definitionFor(possibleTarget.method.getHolder());
-                if (possibleTargetClass != null && !possibleTargetClass.isLibraryClass()) {
-                  callee = graph.ensureMethodNode(possibleTarget);
-                  graph.addCall(caller, callee);
-                }
-              }
-            }
+            addPossibleTargets(definition, possibleTargets);
           }
         }
       }
     }
 
+    private void processFieldAccess(DexField field) {
+      // Any field access implicitly calls the class initializer.
+      addClassInitializerTarget(field.getHolder());
+    }
+
     @Override
     public boolean registerInvokeVirtual(DexMethod method) {
-      processInvoke(caller.method, Type.VIRTUAL, method);
+      processInvoke(Type.VIRTUAL, method);
       return false;
     }
 
     @Override
     public boolean registerInvokeDirect(DexMethod method) {
-      processInvoke(caller.method, Type.DIRECT, method);
+      processInvoke(Type.DIRECT, method);
       return false;
     }
 
     @Override
     public boolean registerInvokeStatic(DexMethod method) {
-      processInvoke(caller.method, Type.STATIC, method);
+      processInvoke(Type.STATIC, method);
       return false;
     }
 
     @Override
     public boolean registerInvokeInterface(DexMethod method) {
-      processInvoke(caller.method, Type.INTERFACE, method);
+      processInvoke(Type.INTERFACE, method);
       return false;
     }
 
     @Override
     public boolean registerInvokeSuper(DexMethod method) {
-      processInvoke(caller.method, Type.SUPER, method);
+      processInvoke(Type.SUPER, method);
       return false;
     }
 
     @Override
     public boolean registerInstanceFieldWrite(DexField field) {
+      processFieldAccess(field);
       return false;
     }
 
     @Override
     public boolean registerInstanceFieldRead(DexField field) {
+      processFieldAccess(field);
       return false;
     }
 
     @Override
     public boolean registerNewInstance(DexType type) {
+      addClassInitializerTarget(type);
       return false;
     }
 
     @Override
     public boolean registerStaticFieldRead(DexField field) {
+      processFieldAccess(field);
       return false;
     }
 
     @Override
     public boolean registerStaticFieldWrite(DexField field) {
+      processFieldAccess(field);
       return false;
     }
 
