@@ -188,6 +188,62 @@ public class Locals {
     }
   }
 
+  public static int stepEmptyForLoopBody1(int n) {
+    int i;
+    for (i = 0; i < n; i++) ;
+    return i;
+  }
+
+  public static int stepEmptyForLoopBody2(int n) {
+    int i;
+    for (i = 0; i < n; i++) {
+      // has a line but still empty...
+    }
+    return i;
+  }
+
+  public static int stepNonEmptyForLoopBody(int n) {
+    int i;
+    for (i = 0; i < n; i++)
+      nop();
+    return i;
+  }
+
+  public static void nop() {}
+
+  public static int tempInCase(int x) {
+    int res = 0;
+    for (int i = 0; i < x; ++i) {
+      int rem = x - i;
+      switch (rem) {
+        case 1:
+          return res;
+        case 5:
+          int tmp = res + x + i;
+          res += tmp;
+          break;
+        case 10:
+          i++;
+          break;
+        default:
+          res += rem;
+      }
+      res += rem % 2;
+    }
+    res *= x;
+    return res;
+  }
+
+  public static int localSwap(int x, int y) {
+    int sum = x + y;
+    {
+      int t = x;
+      x = y;
+      y = t;
+    }
+    return sum + x + y;
+  }
+
   public static void main(String[] args) {
     noLocals();
     unusedLocals();
@@ -198,6 +254,10 @@ public class Locals {
     reverseRange(1,2,3,4,5,6,7);
     new Locals().lotsOfArrayLength();
     new Locals().foo(21);
+    stepEmptyForLoopBody1(3);
+    stepEmptyForLoopBody2(3);
+    stepNonEmptyForLoopBody(3);
+    tempInCase(42);
+    localSwap(1, 2);
   }
-
 }

@@ -31,22 +31,26 @@ import com.android.tools.r8.shaking.RootSetBuilder.RootSet;
 import com.android.tools.r8.utils.MethodSignatureEquivalence;
 import com.android.tools.r8.utils.Timing;
 import com.google.common.base.Equivalence.Wrapper;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.ImmutableSortedSet;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Queues;
 import com.google.common.collect.Sets;
 import com.google.common.collect.Sets.SetView;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Queue;
 import java.util.Set;
+import java.util.SortedSet;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -74,6 +78,9 @@ public class Enqueuer {
   private Map<DexType, Set<DexField>> instanceFieldsRead = Maps.newIdentityHashMap();
   private Map<DexType, Set<DexField>> staticFieldsRead = Maps.newIdentityHashMap();
   private Map<DexType, Set<DexField>> staticFieldsWritten = Maps.newIdentityHashMap();
+
+  private final List<SemanticsProvider> extensions = new ArrayList<>();
+  private final Map<Class, Object> extensionsState = new HashMap<>();
 
   /**
    * This map keeps a view of all virtual methods that are reachable from virtual invokes. A method
@@ -150,6 +157,10 @@ public class Enqueuer {
 
   public Enqueuer(AppInfoWithSubtyping appInfo) {
     this.appInfo = appInfo;
+  }
+
+  public void addExtension(SemanticsProvider extension) {
+    extensions.add(extension);
   }
 
   private void enqueueRootItems(Map<DexItem, ProguardKeepRule> items) {
@@ -852,7 +863,21 @@ public class Enqueuer {
       for (DexAnnotationSet parameterAnnotation : method.parameterAnnotations.values) {
         processAnnotations(parameterAnnotation.annotations);
       }
-      method.registerReachableDefinitions(new UseRegistry(method));
+      boolean processed = false;
+      if (!extensions.isEmpty()) {
+        for (SemanticsProvider extension : extensions) {
+          if (extension.appliesTo(method)) {
+            assert extensions.stream().filter(e -> e.appliesTo(method)).count() == 1;
+            extensionsState.put(extension.getClass(),
+                extension.processMethod(method, new UseRegistry(method),
+                    extensionsState.get(extension.getClass())));
+            processed = true;
+          }
+        }
+      }
+      if (!processed) {
+        method.registerReachableDefinitions(new UseRegistry(method));
+      }
       // Add all dependent members to the workqueue.
       enqueueRootItems(rootSet.getDependentItems(method));
     }
@@ -863,20 +888,24 @@ public class Enqueuer {
         .collect(Collectors.toCollection(Sets::newIdentityHashSet));
   }
 
-  Set<DexField> collectInstanceFieldsRead() {
-    return Collections.unmodifiableSet(collectFields(instanceFieldsRead));
+  SortedSet<DexField> collectInstanceFieldsRead() {
+    return ImmutableSortedSet.copyOf(
+        PresortedComparable::slowCompareTo, collectFields(instanceFieldsRead));
   }
 
-  Set<DexField> collectInstanceFieldsWritten() {
-    return Collections.unmodifiableSet(collectFields(instanceFieldsWritten));
+  SortedSet<DexField> collectInstanceFieldsWritten() {
+    return ImmutableSortedSet.copyOf(
+        PresortedComparable::slowCompareTo, collectFields(instanceFieldsWritten));
   }
 
-  Set<DexField> collectStaticFieldsRead() {
-    return Collections.unmodifiableSet(collectFields(staticFieldsRead));
+  SortedSet<DexField> collectStaticFieldsRead() {
+    return ImmutableSortedSet.copyOf(
+        PresortedComparable::slowCompareTo, collectFields(staticFieldsRead));
   }
 
-  Set<DexField> collectStaticFieldsWritten() {
-    return Collections.unmodifiableSet(collectFields(staticFieldsWritten));
+  SortedSet<DexField> collectStaticFieldsWritten() {
+    return ImmutableSortedSet.copyOf(
+        PresortedComparable::slowCompareTo, collectFields(staticFieldsWritten));
   }
 
   private Set<DexField> collectReachedFields(Map<DexType, Set<DexField>> map,
@@ -895,14 +924,16 @@ public class Enqueuer {
     return target == null ? field : target.field;
   }
 
-  Set<DexField> collectFieldsRead() {
-    return Sets.union(collectReachedFields(instanceFieldsRead, this::tryLookupInstanceField),
-        collectReachedFields(staticFieldsRead, this::tryLookupStaticField));
+  SortedSet<DexField> collectFieldsRead() {
+    return ImmutableSortedSet.copyOf(PresortedComparable::slowCompareTo,
+        Sets.union(collectReachedFields(instanceFieldsRead, this::tryLookupInstanceField),
+        collectReachedFields(staticFieldsRead, this::tryLookupStaticField)));
   }
 
-  Set<DexField> collectFieldsWritten() {
-    return Sets.union(collectReachedFields(instanceFieldsWritten, this::tryLookupInstanceField),
-        collectReachedFields(staticFieldsWritten, this::tryLookupStaticField));
+  SortedSet<DexField> collectFieldsWritten() {
+    return ImmutableSortedSet.copyOf(PresortedComparable::slowCompareTo,
+        Sets.union(collectReachedFields(instanceFieldsWritten, this::tryLookupInstanceField),
+        collectReachedFields(staticFieldsWritten, this::tryLookupStaticField)));
   }
 
   private static class Action {
@@ -986,68 +1017,68 @@ public class Enqueuer {
      * Set of types that are mentioned in the program. We at least need an empty abstract classitem
      * for these.
      */
-    public final Set<DexType> liveTypes;
+    public final SortedSet<DexType> liveTypes;
     /**
      * Set of types that are actually instantiated. These cannot be abstract.
      */
-    final Set<DexType> instantiatedTypes;
+    final SortedSet<DexType> instantiatedTypes;
     /**
      * Set of methods that are the immediate target of an invoke. They might not actually be live
      * but are required so that invokes can find the method. If such a method is not live (i.e. not
      * contained in {@link #liveMethods}, it may be marked as abstract and its implementation may be
      * removed.
      */
-    final Set<DexMethod> targetedMethods;
+    final SortedSet<DexMethod> targetedMethods;
     /**
      * Set of methods that belong to live classes and can be reached by invokes. These need to be
      * kept.
      */
-    final Set<DexMethod> liveMethods;
+    final SortedSet<DexMethod> liveMethods;
     /**
      * Set of fields that belong to live classes and can be reached by invokes. These need to be
      * kept.
      */
-    final Set<DexField> liveFields;
+    public final SortedSet<DexField> liveFields;
     /**
      * Set of all fields which may be touched by a get operation. This is actual field definitions.
      */
-    public final Set<DexField> fieldsRead;
+    public final SortedSet<DexField> fieldsRead;
     /**
      * Set of all fields which may be touched by a put operation. This is actual field definitions.
      */
-    public final Set<DexField> fieldsWritten;
+    public final SortedSet<DexField> fieldsWritten;
     /**
      * Set of all field ids used in instance field reads.
      */
-    public final Set<DexField> instanceFieldReads;
+    public final SortedSet<DexField> instanceFieldReads;
     /**
      * Set of all field ids used in instance field writes.
      */
-    public final Set<DexField> instanceFieldWrites;
+    public final SortedSet<DexField> instanceFieldWrites;
     /**
      * Set of all field ids used in static static field reads.
      */
-    public final Set<DexField> staticFieldReads;
+    public final SortedSet<DexField> staticFieldReads;
     /**
      * Set of all field ids used in static field writes.
      */
-    public final Set<DexField> staticFieldWrites;
+    public final SortedSet<DexField> staticFieldWrites;
     /**
      * Set of all methods referenced in virtual invokes;
      */
-    public final Set<DexMethod> virtualInvokes;
+    public final SortedSet<DexMethod> virtualInvokes;
     /**
      * Set of all methods referenced in super invokes;
      */
-    public final Set<DexMethod> superInvokes;
+    public final SortedSet<DexMethod> superInvokes;
     /**
      * Set of all methods referenced in direct invokes;
      */
-    public final Set<DexMethod> directInvokes;
+    public final SortedSet<DexMethod> directInvokes;
     /**
      * Set of all methods referenced in static invokes;
      */
-    public final Set<DexMethod> staticInvokes;
+    public final SortedSet<DexMethod> staticInvokes;
     /**
      * Set of all items that have to be kept independent of whether they are used.
      */
@@ -1060,11 +1091,21 @@ public class Enqueuer {
      * All items with assumevalues rule.
      */
     public final Map<DexItem, ProguardMemberRule> assumedValues;
+    /**
+     * All methods that have to be inlined due to a configuration directive.
+     */
+    public final Set<DexItem> alwaysInline;
+    /**
+     * Map from the class of an extension to the state it produced.
+     */
+    public final Map<Class, Object> extensions;
 
     private AppInfoWithLiveness(AppInfoWithSubtyping appInfo, Enqueuer enqueuer) {
       super(appInfo);
-      this.liveTypes = Collections.unmodifiableSet(enqueuer.liveTypes);
-      this.instantiatedTypes = enqueuer.instantiatedTypes.getItems();
+      this.liveTypes =
+          ImmutableSortedSet.copyOf(PresortedComparable::slowCompareTo, enqueuer.liveTypes);
+      this.instantiatedTypes = ImmutableSortedSet.copyOf(
+          PresortedComparable::slowCompareTo, enqueuer.instantiatedTypes.getItems());
       this.targetedMethods = toDescriptorSet(enqueuer.targetedMethods.getItems());
       this.liveMethods = toDescriptorSet(enqueuer.liveMethods.getItems());
       this.liveFields = toDescriptorSet(enqueuer.liveFields.getItems());
@@ -1074,13 +1115,15 @@ public class Enqueuer {
       this.staticFieldWrites = enqueuer.collectStaticFieldsWritten();
       this.fieldsRead = enqueuer.collectFieldsRead();
       this.fieldsWritten = enqueuer.collectFieldsWritten();
-      this.pinnedItems = Collections.unmodifiableSet(enqueuer.pinnedItems);
+      this.pinnedItems = ImmutableSet.copyOf(enqueuer.pinnedItems);
       this.virtualInvokes = joinInvokedMethods(enqueuer.virtualInvokes);
       this.superInvokes = joinInvokedMethods(enqueuer.superInvokes);
       this.directInvokes = joinInvokedMethods(enqueuer.directInvokes);
       this.staticInvokes = joinInvokedMethods(enqueuer.staticInvokes);
       this.noSideEffects = enqueuer.rootSet.noSideEffects;
       this.assumedValues = enqueuer.rootSet.assumedValues;
+      this.alwaysInline = enqueuer.rootSet.alwaysInline;
+      this.extensions = enqueuer.extensionsState;
       assert Sets.intersection(instanceFieldReads, staticFieldReads).size() == 0;
       assert Sets.intersection(instanceFieldWrites, staticFieldWrites).size() == 0;
     }
@@ -1106,6 +1149,8 @@ public class Enqueuer {
       this.superInvokes = previous.superInvokes;
       this.directInvokes = previous.directInvokes;
       this.staticInvokes = previous.staticInvokes;
+      this.extensions = previous.extensions;
+      this.alwaysInline = previous.alwaysInline;
       assert Sets.intersection(instanceFieldReads, staticFieldReads).size() == 0;
       assert Sets.intersection(instanceFieldWrites, staticFieldWrites).size() == 0;
     }
@@ -1131,32 +1176,51 @@ public class Enqueuer {
       this.superInvokes = rewriteItems(previous.superInvokes, lense::lookupMethod);
       this.directInvokes = rewriteItems(previous.directInvokes, lense::lookupMethod);
       this.staticInvokes = rewriteItems(previous.staticInvokes, lense::lookupMethod);
+      this.alwaysInline = previous.alwaysInline;
+      this.extensions = previous.extensions;
       assert Sets.intersection(instanceFieldReads, staticFieldReads).size() == 0;
       assert Sets.intersection(instanceFieldWrites, staticFieldWrites).size() == 0;
     }
 
-    private Set<DexMethod> joinInvokedMethods(Map<DexType, Set<DexMethod>> invokes) {
-      ImmutableSet.Builder<DexMethod> builder = ImmutableSet.builder();
+    private SortedSet<DexMethod> joinInvokedMethods(Map<DexType, Set<DexMethod>> invokes) {
+      ImmutableSortedSet.Builder<DexMethod> builder =
+          new ImmutableSortedSet.Builder<>(PresortedComparable::slowCompare);
       invokes.values().forEach(builder::addAll);
       return builder.build();
     }
 
-    private <T extends PresortedComparable<T>> Set<T> toDescriptorSet(
+    private <T extends PresortedComparable<T>> SortedSet<T> toDescriptorSet(
         Set<? extends KeyedDexItem<T>> set) {
-      ImmutableSet.Builder<T> builder = ImmutableSet.builder();
+      ImmutableSortedSet.Builder<T> builder =
+          new ImmutableSortedSet.Builder<>(PresortedComparable::slowCompareTo);
       for (KeyedDexItem<T> item : set) {
         builder.add(item.getKey());
       }
       return builder.build();
     }
 
-    private static <T> ImmutableSet<T> rewriteItems(Set<T> original,
-        BiFunction<T, DexEncodedMethod, T> rewrite) {
-      ImmutableSet.Builder<T> builder = ImmutableSet.builder();
+    private static <T extends PresortedComparable<T>> ImmutableSortedSet<T> rewriteItems(
+        Set<T> original, BiFunction<T, DexEncodedMethod, T> rewrite) {
+      ImmutableSortedSet.Builder<T> builder =
+          new ImmutableSortedSet.Builder<>(PresortedComparable::slowCompare);
       for (T item : original) {
         builder.add(rewrite.apply(item, null));
       }
       return builder.build();
+    }
+
+    @SuppressWarnings("unchecked")
+    public <T> T getExtension(Class extension, T defaultValue) {
+      if (extensions.containsKey(extension)) {
+        return (T) extensions.get(extension);
+      } else {
+        return defaultValue;
+      }
+    }
+
+    public <T> void setExtension(Class extension, T value) {
+      assert !extensions.containsKey(extension);
+      extensions.put(extension, value);
     }
 
     @Override
@@ -1201,11 +1265,11 @@ public class Enqueuer {
     }
 
     Set<T> getItems() {
-      return Collections.unmodifiableSet(items);
+      return ImmutableSet.copyOf(items);
     }
 
     Map<T, KeepReason> getReasons() {
-      return Collections.unmodifiableMap(reasons);
+      return ImmutableMap.copyOf(reasons);
     }
   }
 
@@ -1298,5 +1362,13 @@ public class Enqueuer {
       }
       return false;
     }
+  }
+
+  public interface SemanticsProvider {
+
+    boolean appliesTo(DexEncodedMethod method);
+
+    Object processMethod(DexEncodedMethod method,
+        com.android.tools.r8.graph.UseRegistry useRegistry, Object state);
   }
 }

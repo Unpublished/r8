@@ -44,7 +44,7 @@ final class InterfaceProcessor {
 
     // Process virtual interface methods first.
     List<DexEncodedMethod> remainingMethods = new ArrayList<>();
-    for (DexEncodedMethod virtual : iface.virtualMethods) {
+    for (DexEncodedMethod virtual : iface.virtualMethods()) {
       if (rewriter.isDefaultMethod(virtual)) {
         // Create a new method in a companion class to represent default method implementation.
         DexMethod companionMethod = rewriter.defaultAsMethodOfCompanionClass(virtual.method);
@@ -62,8 +62,7 @@ final class InterfaceProcessor {
         // TODO(ager): Should we give the new first parameter an actual name? Maybe 'this'?
         dexCode.setDebugInfo(dexCode.debugInfoWithAdditionalFirstParameter(null));
         assert (dexCode.getDebugInfo() == null)
-            || (companionMethod.proto.parameters.values.length
-                == dexCode.getDebugInfo().parameters.length);
+            || (companionMethod.getArity() == dexCode.getDebugInfo().parameters.length);
 
         companionMethods.add(new DexEncodedMethod(companionMethod,
             newFlags, virtual.annotations, virtual.parameterAnnotations, code));
@@ -80,14 +79,14 @@ final class InterfaceProcessor {
     }
 
     // If at least one bridge methods was removed update the table.
-    if (remainingMethods.size() < iface.virtualMethods.length) {
-      iface.virtualMethods = remainingMethods.toArray(
-          new DexEncodedMethod[remainingMethods.size()]);
+    if (remainingMethods.size() < iface.virtualMethods().length) {
+      iface.setVirtualMethods(remainingMethods.toArray(
+          new DexEncodedMethod[remainingMethods.size()]));
     }
     remainingMethods.clear();
 
     // Process static methods, move them into companion class as well.
-    for (DexEncodedMethod direct : iface.directMethods) {
+    for (DexEncodedMethod direct : iface.directMethods()) {
       if (direct.accessFlags.isPrivate()) {
         // We only expect to see private methods which are lambda$ methods,
         // and they are supposed to be relaxed to package private static methods
@@ -106,9 +105,9 @@ final class InterfaceProcessor {
         remainingMethods.add(direct);
       }
     }
-    if (remainingMethods.size() < iface.directMethods.length) {
-      iface.directMethods = remainingMethods.toArray(
-          new DexEncodedMethod[remainingMethods.size()]);
+    if (remainingMethods.size() < iface.directMethods().length) {
+      iface.setDirectMethods(remainingMethods.toArray(
+          new DexEncodedMethod[remainingMethods.size()]));
     }
 
     if (companionMethods.isEmpty()) {

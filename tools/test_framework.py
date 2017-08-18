@@ -32,9 +32,9 @@ DX_JAR = os.path.join(utils.REPO_ROOT, 'tools', 'linux', 'dx', 'framework',
     'dx.jar')
 D8_JAR = os.path.join(utils.REPO_ROOT, 'build', 'libs', 'd8.jar')
 GOYT_EXE = os.path.join('third_party', 'goyt',
-    'goyt_160525751')
+    'goyt_164843480')
 FRAMEWORK_JAR = os.path.join('third_party', 'framework',
-    'framework_160115954.jar')
+    'framework_14082017_desugared.jar')
 MIN_SDK_VERSION = '24'
 
 def parse_arguments():
@@ -43,15 +43,16 @@ def parse_arguments():
           ' third_party/framework/framework*.jar.'
           ' Report Golem-compatible CodeSize and RunTimeRaw values.')
   parser.add_argument('--tool',
-      choices = ['dx', 'd8', 'd8-release', 'goyt'],
+      choices = ['dx', 'd8', 'd8-release', 'goyt', 'goyt-release'],
       required = True,
       help = 'Compiler tool to use.')
   parser.add_argument('--name',
       required = True,
       help = 'Results will be printed using the specified benchmark name (e.g.'
-          ' <NAME>-<segment>(CodeSize): <bytes>)')
+          ' <NAME>-<segment>(CodeSize): <bytes>), the full size is reported'
+          ' with <NAME>-Total(CodeSize)')
   parser.add_argument('--print-memoryuse',
-      help = 'Prints the line \'<NAME>(MemoryUse):' +
+      help = 'Prints the line \'<NAME>-Total(MemoryUse):' +
              ' <mem>\' at the end where <mem> is the peak' +
              ' peak resident set size (VmHWM) in bytes.',
       default = False,
@@ -64,21 +65,25 @@ def Main():
 
   with utils.TempDir() as temp_dir:
 
-    if args.tool in ['dx', 'goyt']:
+    if args.tool in ['dx', 'goyt', 'goyt-release']:
       tool_args = ['--dex', '--output=' + temp_dir, '--multi-dex',
           '--min-sdk-version=' + MIN_SDK_VERSION]
 
-    if args.tool == 'goyt':
+    xmx = None
+    if args.tool.startswith('goyt'):
       tool_file = GOYT_EXE
-      tool_args = ['--num-threads=4'] + tool_args
+      tool_args = ['--num-threads=8'] + tool_args
+      if args.tool == 'goyt-release':
+        tool_args.append('--no-locals')
     elif args.tool == 'dx':
       tool_file = DX_JAR
+      xmx = '-Xmx1600m'
     else:
       tool_file = D8_JAR
       tool_args = ['--output', temp_dir, '--min-api', MIN_SDK_VERSION]
       if args.tool == 'd8-release':
         tool_args.append('--release')
-
+      xmx = '-Xmx600m'
 
     cmd = []
 
@@ -88,7 +93,8 @@ def Main():
       cmd.extend(['tools/track_memory.sh', track_memory_file])
 
     if tool_file.endswith('.jar'):
-      cmd.extend(['java', '-jar'])
+      assert xmx is not None
+      cmd.extend(['java', xmx, '-jar'])
 
     cmd.extend([tool_file] + tool_args + [FRAMEWORK_JAR])
 
@@ -99,7 +105,7 @@ def Main():
     dt = time.time() - t0
 
     if args.print_memoryuse:
-      print('{}(MemoryUse): {}'
+      print('{}-Total(MemoryUse): {}'
           .format(args.name, utils.grep_memoryuse(track_memory_file)))
 
     dex_files = [f for f in glob(os.path.join(temp_dir, '*.dex'))]

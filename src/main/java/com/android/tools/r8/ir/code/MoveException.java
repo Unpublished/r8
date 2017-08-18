@@ -4,10 +4,15 @@
 package com.android.tools.r8.ir.code;
 
 import com.android.tools.r8.dex.Constants;
+import com.android.tools.r8.graph.AppInfoWithSubtyping;
+import com.android.tools.r8.graph.DexType;
 import com.android.tools.r8.ir.conversion.DexBuilder;
+import com.android.tools.r8.ir.optimize.Inliner.Constraint;
 import com.android.tools.r8.utils.InternalOptions;
 
 public class MoveException extends Instruction {
+
+  private DebugPosition position = null;
 
   public MoveException(Value dest) {
     super(dest);
@@ -15,6 +20,14 @@ public class MoveException extends Instruction {
 
   public Value dest() {
     return outValue;
+  }
+
+  public DebugPosition getPosition() {
+    return position;
+  }
+
+  public void setPosition(DebugPosition position) {
+    this.position = position;
   }
 
   @Override
@@ -59,5 +72,23 @@ public class MoveException extends Instruction {
   @Override
   public boolean canBeDeadCode(IRCode code, InternalOptions options) {
     return !options.debug;
+  }
+
+  @Override
+  public String toString() {
+    if (position != null) {
+      StringBuilder builder = new StringBuilder(super.toString());
+      builder.append("(DebugPosition ");
+      position.printLineInfo(builder);
+      builder.append(')');
+      return builder.toString();
+    }
+    return super.toString();
+  }
+
+  @Override
+  public Constraint inliningConstraint(AppInfoWithSubtyping info, DexType holder) {
+    // TODO(64432527): Revisit this constraint.
+    return Constraint.NEVER;
   }
 }

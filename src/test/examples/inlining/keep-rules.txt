@@ -8,5 +8,6 @@
   public static void main(...);
 }
 
-# allow access modification to enable minifcation
--allowaccessmodification
+-alwaysinline class * {
+  @inlining.AlwaysInline <methods>;
+}

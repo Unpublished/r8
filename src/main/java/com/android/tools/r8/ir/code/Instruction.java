@@ -4,7 +4,7 @@
 package com.android.tools.r8.ir.code;
 
 import com.android.tools.r8.errors.Unreachable;
-import com.android.tools.r8.graph.AppInfo;
+import com.android.tools.r8.graph.AppInfoWithSubtyping;
 import com.android.tools.r8.graph.DebugLocalInfo;
 import com.android.tools.r8.graph.DexType;
 import com.android.tools.r8.ir.code.Value.DebugInfo;
@@ -61,7 +61,7 @@ public abstract class Instruction {
   }
 
   public void setOutValue(Value value) {
-    assert outValue == null || !outValue.hasUsersInfo() || outValue.numberOfAllUsers() == 0;
+    assert outValue == null || !outValue.hasUsersInfo() || !outValue.isUsed();
     outValue = value;
     if (outValue != null) {
       outValue.definition = this;
@@ -839,7 +839,5 @@ public abstract class Instruction {
   }
 
   // Returns the inlining constraint for this instruction.
-  public Constraint inliningConstraint(AppInfo info, DexType holder) {
-    return Constraint.NEVER;
-  }
+  public abstract Constraint inliningConstraint(AppInfoWithSubtyping info, DexType holder);
 }

@@ -7,7 +7,7 @@ package com.android.tools.r8.smali;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
-import com.android.tools.r8.R8;
+import com.android.tools.r8.ToolHelper;
 import com.android.tools.r8.code.Const;
 import com.android.tools.r8.code.Const4;
 import com.android.tools.r8.code.ConstHigh16;
@@ -284,19 +284,18 @@ public class SwitchRewritingTest extends SmaliTestBase {
         "    return");
 
     DexApplication app = builder.read();
-    app = new R8(new InternalOptions()).optimize(app, new AppInfoWithSubtyping(app));
+    app = ToolHelper.optimizeWithR8(app, new AppInfoWithSubtyping(app), new InternalOptions());
 
     MethodSignature signature = new MethodSignature("Test", "test", "int", ImmutableList.of("int"));
     DexEncodedMethod method = getMethod(app, signature);
     DexCode code = method.getCode().asDexCode();
     if (key == 0) {
       assertEquals(5, code.instructions.length);
-      assertTrue(code.instructions[0] instanceof IfEqz);
+      assertTrue(code.instructions[2] instanceof IfEqz);
     } else {
       assertEquals(6, code.instructions.length);
-      assertTrue(some16BitConst(code.instructions[0]));
-      assertTrue(code.instructions[1] instanceof IfEq);
-      assertTrue(code.instructions[2] instanceof Const4);
+      assertTrue(some16BitConst(code.instructions[2]));
+      assertTrue(code.instructions[3] instanceof IfEq);
     }
   }
 
@@ -344,15 +343,15 @@ public class SwitchRewritingTest extends SmaliTestBase {
         "    return");
 
     DexApplication app = builder.read();
-    app = new R8(new InternalOptions()).optimize(app, new AppInfoWithSubtyping(app));
+    app = ToolHelper.optimizeWithR8(app, new AppInfoWithSubtyping(app), new InternalOptions());
 
     MethodSignature signature = new MethodSignature("Test", "test", "int", ImmutableList.of("int"));
     DexEncodedMethod method = getMethod(app, signature);
     DexCode code = method.getCode().asDexCode();
     if (twoCaseWillUsePackedSwitch(key1, key2)) {
-      assertTrue(code.instructions[0] instanceof PackedSwitch);
+      assertTrue(code.instructions[3] instanceof PackedSwitch);
     } else {
-      assertTrue(code.instructions[0] instanceof SparseSwitch);
+      assertTrue(code.instructions[3] instanceof SparseSwitch);
     }
   }
 
@@ -417,15 +416,27 @@ public class SwitchRewritingTest extends SmaliTestBase {
         "    return");
 
     DexApplication app = builder.read();
-    app = new R8(new InternalOptions()).optimize(app, new AppInfoWithSubtyping(app));
+    app = ToolHelper.optimizeWithR8(app, new AppInfoWithSubtyping(app), new InternalOptions());
 
     MethodSignature signature = new MethodSignature("Test", "test", "int", ImmutableList.of("int"));
     DexEncodedMethod method = getMethod(app, signature);
     DexCode code = method.getCode().asDexCode();
+    int packedSwitchCount = 0;
+    int sparseSwitchCount = 0;
+    for (Instruction instruction : code.instructions) {
+      if (instruction instanceof PackedSwitch) {
+        packedSwitchCount++;
+      }
+      if (instruction instanceof SparseSwitch) {
+        sparseSwitchCount++;
+      }
+    }
     if (keyStep <= 2) {
-      assertTrue(code.instructions[0] instanceof PackedSwitch);
+      assertEquals(1, packedSwitchCount);
+      assertEquals(0, sparseSwitchCount);
     } else {
-      assertTrue(code.instructions[0] instanceof SparseSwitch);
+      assertEquals(0, packedSwitchCount);
+      assertEquals(1, sparseSwitchCount);
     }
   }
 

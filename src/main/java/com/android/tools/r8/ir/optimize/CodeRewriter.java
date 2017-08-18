@@ -6,21 +6,35 @@ package com.android.tools.r8.ir.optimize;
 
 import com.android.tools.r8.dex.Constants;
 import com.android.tools.r8.errors.CompilationError;
+import com.android.tools.r8.errors.Unreachable;
 import com.android.tools.r8.graph.AppInfo;
+import com.android.tools.r8.graph.AppInfoWithSubtyping;
 import com.android.tools.r8.graph.DexClass;
+import com.android.tools.r8.graph.DexEncodedField;
 import com.android.tools.r8.graph.DexEncodedMethod;
 import com.android.tools.r8.graph.DexField;
 import com.android.tools.r8.graph.DexItemFactory;
 import com.android.tools.r8.graph.DexMethod;
 import com.android.tools.r8.graph.DexProto;
 import com.android.tools.r8.graph.DexType;
-import com.android.tools.r8.ir.code.ArrayGet;
+import com.android.tools.r8.graph.DexValue.DexValueBoolean;
+import com.android.tools.r8.graph.DexValue.DexValueByte;
+import com.android.tools.r8.graph.DexValue.DexValueChar;
+import com.android.tools.r8.graph.DexValue.DexValueDouble;
+import com.android.tools.r8.graph.DexValue.DexValueFloat;
+import com.android.tools.r8.graph.DexValue.DexValueInt;
+import com.android.tools.r8.graph.DexValue.DexValueLong;
+import com.android.tools.r8.graph.DexValue.DexValueNull;
+import com.android.tools.r8.graph.DexValue.DexValueShort;
+import com.android.tools.r8.graph.DexValue.DexValueString;
 import com.android.tools.r8.ir.code.ArrayPut;
 import com.android.tools.r8.ir.code.BasicBlock;
 import com.android.tools.r8.ir.code.Binop;
 import com.android.tools.r8.ir.code.CatchHandlers;
+import com.android.tools.r8.ir.code.CheckCast;
 import com.android.tools.r8.ir.code.Cmp;
 import com.android.tools.r8.ir.code.Cmp.Bias;
+import com.android.tools.r8.ir.code.ConstInstruction;
 import com.android.tools.r8.ir.code.ConstNumber;
 import com.android.tools.r8.ir.code.ConstString;
 import com.android.tools.r8.ir.code.DominatorTree;
@@ -32,8 +46,8 @@ import com.android.tools.r8.ir.code.Instruction;
 import com.android.tools.r8.ir.code.InstructionIterator;
 import com.android.tools.r8.ir.code.InstructionListIterator;
 import com.android.tools.r8.ir.code.Invoke;
-import com.android.tools.r8.ir.code.InvokeDirect;
 import com.android.tools.r8.ir.code.InvokeMethod;
+import com.android.tools.r8.ir.code.InvokeNewArray;
 import com.android.tools.r8.ir.code.InvokeVirtual;
 import com.android.tools.r8.ir.code.MemberType;
 import com.android.tools.r8.ir.code.MoveType;
@@ -47,6 +61,7 @@ import com.android.tools.r8.ir.code.StaticPut;
 import com.android.tools.r8.ir.code.Switch;
 import com.android.tools.r8.ir.code.Value;
 import com.android.tools.r8.ir.conversion.OptimizationFeedback;
+import com.android.tools.r8.ir.optimize.SwitchUtils.EnumSwitchInfo;
 import com.android.tools.r8.utils.InternalOptions;
 import com.android.tools.r8.utils.LongInterval;
 import com.google.common.base.Equivalence;
@@ -54,19 +69,15 @@ import com.google.common.base.Equivalence.Wrapper;
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ListMultimap;
+import com.google.common.collect.Maps;
 import it.unimi.dsi.fastutil.ints.Int2IntArrayMap;
 import it.unimi.dsi.fastutil.ints.Int2IntMap;
-import it.unimi.dsi.fastutil.ints.Int2ReferenceArrayMap;
-import it.unimi.dsi.fastutil.ints.Int2ReferenceMap;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
 import it.unimi.dsi.fastutil.ints.IntList;
-import it.unimi.dsi.fastutil.objects.Reference2IntArrayMap;
-import it.unimi.dsi.fastutil.objects.Reference2IntMap;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
@@ -86,12 +97,12 @@ public class CodeRewriter {
 
   private final AppInfo appInfo;
   private final DexItemFactory dexItemFactory;
-  private final Set<DexType> libraryClassesWithOptimizationInfo;
+  private final Set<DexMethod> libraryMethodsReturningReceiver;
 
-  public CodeRewriter(AppInfo appInfo, Set<DexType> libraryClassesWithOptimizationInfo) {
+  public CodeRewriter(AppInfo appInfo, Set<DexMethod> libraryMethodsReturningReceiver) {
     this.appInfo = appInfo;
     this.dexItemFactory = appInfo.dexItemFactory;
-    this.libraryClassesWithOptimizationInfo = libraryClassesWithOptimizationInfo;
+    this.libraryMethodsReturningReceiver = libraryMethodsReturningReceiver;
   }
 
   /**
@@ -371,8 +382,6 @@ public class CodeRewriter {
    *   ...
    * }
    * </pre></blockquote>
-   * See {@link #extractIndexMapFrom} and {@link #extractOrdinalsMapFor} for
-   * details of the companion class and ordinals computation.
    */
   public void removeSwitchMaps(IRCode code) {
     for (BasicBlock block : code.blocks) {
@@ -382,219 +391,43 @@ public class CodeRewriter {
         // Pattern match a switch on a switch map as input.
         if (insn.isSwitch()) {
           Switch switchInsn = insn.asSwitch();
-          Instruction input = switchInsn.inValues().get(0).definition;
-          if (input == null || !input.isArrayGet()) {
-            continue;
-          }
-          ArrayGet arrayGet = input.asArrayGet();
-          Instruction index = arrayGet.index().definition;
-          if (index == null || !index.isInvokeVirtual()) {
-            continue;
-          }
-          InvokeVirtual ordinalInvoke = index.asInvokeVirtual();
-          DexMethod ordinalMethod = ordinalInvoke.getInvokedMethod();
-          DexClass enumClass = appInfo.definitionFor(ordinalMethod.holder);
-          if (enumClass == null
-              || (!enumClass.accessFlags.isEnum() && enumClass.type != dexItemFactory.enumType)
-              || ordinalMethod.name != dexItemFactory.ordinalMethodName
-              || ordinalMethod.proto.returnType != dexItemFactory.intType
-              || !ordinalMethod.proto.parameters.isEmpty()) {
-            continue;
-          }
-          Instruction array = arrayGet.array().definition;
-          if (array == null || !array.isStaticGet()) {
-            continue;
-          }
-          StaticGet staticGet = array.asStaticGet();
-          if (staticGet.getField().name.toSourceString().startsWith("$SwitchMap$")) {
-            Int2ReferenceMap<DexField> indexMap = extractIndexMapFrom(staticGet.getField());
-            if (indexMap == null || indexMap.isEmpty()) {
-              continue;
+          EnumSwitchInfo info = SwitchUtils
+              .analyzeSwitchOverEnum(switchInsn, appInfo.withLiveness());
+          if (info != null) {
+            Int2IntMap targetMap = new Int2IntArrayMap();
+            IntList keys = new IntArrayList(switchInsn.numberOfKeys());
+            for (int i = 0; i < switchInsn.numberOfKeys(); i++) {
+              assert switchInsn.targetBlockIndices()[i] != switchInsn.getFallthroughBlockIndex();
+              int key = info.ordinalsMap.getInt(info.indexMap.get(switchInsn.getKey(i)));
+              keys.add(key);
+              targetMap.put(key, switchInsn.targetBlockIndices()[i]);
             }
-            // Due to member rebinding, only the fields are certain to provide the actual enums
-            // class.
-            DexType switchMapHolder = indexMap.values().iterator().next().getHolder();
-            Reference2IntMap ordinalsMap = extractOrdinalsMapFor(switchMapHolder);
-            if (ordinalsMap != null) {
-              Int2IntMap targetMap = new Int2IntArrayMap();
-              IntList keys = new IntArrayList(switchInsn.numberOfKeys());
-              for (int i = 0; i < switchInsn.numberOfKeys(); i++) {
-                assert switchInsn.targetBlockIndices()[i] != switchInsn.getFallthroughBlockIndex();
-                int key = ordinalsMap.getInt(indexMap.get(switchInsn.getKey(i)));
-                keys.add(key);
-                targetMap.put(key, switchInsn.targetBlockIndices()[i]);
-              }
-              keys.sort(Comparator.naturalOrder());
-              int[] targets = new int[keys.size()];
-              for (int i = 0; i < keys.size(); i++) {
-                targets[i] = targetMap.get(keys.getInt(i));
-              }
+            keys.sort(Comparator.naturalOrder());
+            int[] targets = new int[keys.size()];
+            for (int i = 0; i < keys.size(); i++) {
+              targets[i] = targetMap.get(keys.getInt(i));
+            }
 
-              Switch newSwitch = new Switch(ordinalInvoke.outValue(), keys.toIntArray(),
-                  targets, switchInsn.getFallthroughBlockIndex());
-              // Replace the switch itself.
-              it.replaceCurrentInstruction(newSwitch);
-              // If the original input to the switch is now unused, remove it too. It is not dead
-              // as it might have side-effects but we ignore these here.
-              if (arrayGet.outValue().numberOfUsers() == 0) {
-                arrayGet.inValues().forEach(v -> v.removeUser(arrayGet));
-                arrayGet.getBlock().removeInstruction(arrayGet);
-              }
-              if (staticGet.outValue().numberOfUsers() == 0) {
-                assert staticGet.inValues().isEmpty();
-                staticGet.getBlock().removeInstruction(staticGet);
-              }
+            Switch newSwitch = new Switch(info.ordinalInvoke.outValue(), keys.toIntArray(),
+                targets, switchInsn.getFallthroughBlockIndex());
+            // Replace the switch itself.
+            it.replaceCurrentInstruction(newSwitch);
+            // If the original input to the switch is now unused, remove it too. It is not dead
+            // as it might have side-effects but we ignore these here.
+            Instruction arrayGet = info.arrayGet;
+            if (arrayGet.outValue().numberOfUsers() == 0) {
+              arrayGet.inValues().forEach(v -> v.removeUser(arrayGet));
+              arrayGet.getBlock().removeInstruction(arrayGet);
+            }
+            Instruction staticGet = info.staticGet;
+            if (staticGet.outValue().numberOfUsers() == 0) {
+              assert staticGet.inValues().isEmpty();
+              staticGet.getBlock().removeInstruction(staticGet);
             }
           }
         }
       }
     }
-  }
-
-
-  /**
-   * Extracts the mapping from ordinal values to switch case constants.
-   * <p>
-   * This is done by pattern-matching on the class initializer of the synthetic switch map class.
-   * For a switch
-   *
-   * <blockquote><pre>
-   * switch (day) {
-   *   case WEDNESDAY:
-   *   case FRIDAY:
-   *     System.out.println("3 or 5");
-   *     break;
-   *   case SUNDAY:
-   *     System.out.println("7");
-   *     break;
-   *   default:
-   *     System.out.println("other");
-   * }
-   * </pre></blockquote>
-   *
-   * the generated companing class initializer will have the form
-   *
-   * <blockquote><pre>
-   * class Switches$1 {
-   *   static {
-   *   $SwitchMap$switchmaps$Days[Days.WEDNESDAY.ordinal()] = 1;
-   *   $SwitchMap$switchmaps$Days[Days.FRIDAY.ordinal()] = 2;
-   *   $SwitchMap$switchmaps$Days[Days.SUNDAY.ordinal()] = 3;
-   * }
-   * </pre></blockquote>
-   *
-   * Note that one map per class is generated, so the map might contain additional entries as used
-   * by other switches in the class.
-   */
-  private Int2ReferenceMap<DexField> extractIndexMapFrom(DexField field) {
-    DexClass clazz = appInfo.definitionFor(field.getHolder());
-    if (!clazz.accessFlags.isSynthetic()) {
-      return null;
-    }
-    DexEncodedMethod initializer = clazz.getClassInitializer();
-    if (initializer == null || initializer.getCode() == null) {
-      return null;
-    }
-    IRCode code = initializer.getCode().buildIR(initializer, new InternalOptions());
-    Int2ReferenceMap<DexField> switchMap = new Int2ReferenceArrayMap<>();
-    for (BasicBlock block : code.blocks) {
-      InstructionListIterator it = block.listIterator();
-      Instruction insn = it.nextUntil(i -> i.isStaticGet() && i.asStaticGet().getField() == field);
-      if (insn == null) {
-        continue;
-      }
-      for (Instruction use : insn.outValue().uniqueUsers()) {
-        if (use.isArrayPut()) {
-          Instruction index = use.asArrayPut().source().definition;
-          if (index == null || !index.isConstNumber()) {
-            return null;
-          }
-          int integerIndex = index.asConstNumber().getIntValue();
-          Instruction value = use.asArrayPut().index().definition;
-          if (value == null || !value.isInvokeVirtual()) {
-            return null;
-          }
-          InvokeVirtual invoke = value.asInvokeVirtual();
-          DexClass holder = appInfo.definitionFor(invoke.getInvokedMethod().holder);
-          if (holder == null ||
-              (!holder.accessFlags.isEnum() && holder.type != dexItemFactory.enumType)) {
-            return null;
-          }
-          Instruction enumGet = invoke.arguments().get(0).definition;
-          if (enumGet == null || !enumGet.isStaticGet()) {
-            return null;
-          }
-          DexField enumField = enumGet.asStaticGet().getField();
-          if (!appInfo.definitionFor(enumField.getHolder()).accessFlags.isEnum()) {
-            return null;
-          }
-          if (switchMap.put(integerIndex, enumField) != null) {
-            return null;
-          }
-        } else {
-          return null;
-        }
-      }
-    }
-    return switchMap;
-  }
-
-  /**
-   * Extracts the ordinal values for an Enum class from the classes static initializer.
-   * <p>
-   * An Enum class has a field for each value. In the class initializer, each field is initialized
-   * to a singleton object that represents the value. This code matches on the corresponding call
-   * to the constructor (instance initializer) and extracts the value of the second argument, which
-   * is the ordinal.
-   */
-  private Reference2IntMap<DexField> extractOrdinalsMapFor(DexType enumClass) {
-    DexClass clazz = appInfo.definitionFor(enumClass);
-    if (clazz == null || clazz.isLibraryClass()) {
-      // We have to keep binary compatibility in tact for libraries.
-      return null;
-    }
-    DexEncodedMethod initializer = clazz.getClassInitializer();
-    if (!clazz.accessFlags.isEnum() || initializer == null || initializer.getCode() == null) {
-      return null;
-    }
-    IRCode code = initializer.getCode().buildIR(initializer, new InternalOptions());
-    Reference2IntMap<DexField> ordinalsMap = new Reference2IntArrayMap<>();
-    ordinalsMap.defaultReturnValue(-1);
-    InstructionIterator it = code.instructionIterator();
-    while (it.hasNext()) {
-      Instruction insn = it.next();
-      if (!insn.isStaticPut()) {
-        continue;
-      }
-      StaticPut staticPut = insn.asStaticPut();
-      if (staticPut.getField().type != enumClass) {
-        continue;
-      }
-      Instruction newInstance = staticPut.inValue().definition;
-      if (newInstance == null || !newInstance.isNewInstance()) {
-        continue;
-      }
-      Instruction ordinal = null;
-      for (Instruction ctorCall : newInstance.outValue().uniqueUsers()) {
-        if (!ctorCall.isInvokeDirect()) {
-          continue;
-        }
-        InvokeDirect invoke = ctorCall.asInvokeDirect();
-        if (!dexItemFactory.isConstructor(invoke.getInvokedMethod())
-            || invoke.arguments().size() < 3) {
-          continue;
-        }
-        ordinal = invoke.arguments().get(2).definition;
-        break;
-      }
-      if (ordinal == null || !ordinal.isConstNumber()) {
-        return null;
-      }
-      if (ordinalsMap.put(staticPut.getField(), ordinal.asConstNumber().getIntValue()) != -1) {
-        return null;
-      }
-    }
-    return ordinalsMap;
   }
 
   /**
@@ -685,37 +518,39 @@ public class CodeRewriter {
 
   // Replace result uses for methods where something is known about what is returned.
   public void rewriteMoveResult(IRCode code) {
-    if (!appInfo.hasSubtyping()) {
-      return;
-    }
+    AppInfoWithSubtyping appInfoWithSubtyping = appInfo.withSubtyping();
     InstructionIterator iterator = code.instructionIterator();
     while (iterator.hasNext()) {
       Instruction current = iterator.next();
       if (current.isInvokeMethod()) {
         InvokeMethod invoke = current.asInvokeMethod();
-        if (invoke.outValue() != null) {
-          DexEncodedMethod target = invoke.computeSingleTarget(appInfo.withSubtyping());
-          // We have a set of library classes with optimization information - consider those
-          // as well.
-          if ((target == null) &&
-              libraryClassesWithOptimizationInfo.contains(invoke.getInvokedMethod().getHolder())) {
-            target = appInfo.definitionFor(invoke.getInvokedMethod());
-          }
-          if (target != null) {
-            DexMethod invokedMethod = target.method;
-            // Check if the invoked method is known to return one of its arguments.
-            DexEncodedMethod definition = appInfo.definitionFor(invokedMethod);
-            if (definition != null && definition.getOptimizationInfo().returnsArgument()) {
-              int argumentIndex = definition.getOptimizationInfo().getReturnedArgument();
-              // Replace the out value of the invoke with the argument and ignore the out value.
-              if (argumentIndex != -1 && checkArgumentType(invoke, target.method, argumentIndex)) {
-                Value argument = invoke.arguments().get(argumentIndex);
-                assert (invoke.outType() == argument.outType()) ||
-                    (invoke.outType() == MoveType.OBJECT
-                        && argument.outType() == MoveType.SINGLE
-                        && argument.getConstInstruction().asConstNumber().isZero());
-                invoke.outValue().replaceUsers(argument);
-                invoke.setOutValue(null);
+        if (invoke.outValue() != null && invoke.outValue().getLocalInfo() == null) {
+          boolean isLibraryMethodReturningReceiver =
+              libraryMethodsReturningReceiver.contains(invoke.getInvokedMethod());
+          if (isLibraryMethodReturningReceiver) {
+            if (checkArgumentType(invoke, invoke.getInvokedMethod(), 0)) {
+              invoke.outValue().replaceUsers(invoke.arguments().get(0));
+              invoke.setOutValue(null);
+            }
+          } else if (appInfoWithSubtyping != null) {
+            DexEncodedMethod target = invoke.computeSingleTarget(appInfoWithSubtyping);
+            if (target != null) {
+              DexMethod invokedMethod = target.method;
+              // Check if the invoked method is known to return one of its arguments.
+              DexEncodedMethod definition = appInfo.definitionFor(invokedMethod);
+              if (definition != null && definition.getOptimizationInfo().returnsArgument()) {
+                int argumentIndex = definition.getOptimizationInfo().getReturnedArgument();
+                // Replace the out value of the invoke with the argument and ignore the out value.
+                if (argumentIndex != -1 && checkArgumentType(invoke, target.method,
+                    argumentIndex)) {
+                  Value argument = invoke.arguments().get(argumentIndex);
+                  assert (invoke.outType() == argument.outType()) ||
+                      (invoke.outType() == MoveType.OBJECT
+                          && argument.outType() == MoveType.SINGLE
+                          && argument.getConstInstruction().asConstNumber().isZero());
+                  invoke.outValue().replaceUsers(argument);
+                  invoke.setOutValue(null);
+                }
               }
             }
           }
@@ -725,42 +560,45 @@ public class CodeRewriter {
     assert code.isConsistentGraph();
   }
 
-  // For supporting assert javac adds the static field $assertionsDisabled to all classes which
-  // have methods with assertions. This is used to support the Java VM -ea flag.
-  //
-  //  The class:
-  //
-  //  class A {
-  //    void m() {
-  //      assert xxx;
-  //    }
-  //  }
-  //
-  //  Is compiled into:
-  //
-  //  class A {
-  //    static boolean $assertionsDisabled;
-  //    static {
-  //      $assertionsDisabled = A.class.desiredAssertionStatus();
-  //    }
-  //
-  //    // method with "assert xxx";
-  //    void m() {
-  //      if (!$assertionsDisabled) {
-  //        if (xxx) {
-  //          throw new AssertionError(...);
-  //        }
-  //      }
-  //    }
-  //  }
-  //
-  //  With the rewriting below (and other rewritings) the resulting code is:
-  //
-  //  class A {
-  //    void m() {
-  //    }
-  //  }
-  //
+
+  /**
+   * For supporting assert javac adds the static field $assertionsDisabled to all classes which
+   * have methods with assertions. This is used to support the Java VM -ea flag.
+   *
+   * The class:
+   * <pre>
+   * class A {
+   *   void m() {
+   *     assert xxx;
+   *   }
+   * }
+   * </pre>
+   * Is compiled into:
+   * <pre>
+   * class A {
+   *   static boolean $assertionsDisabled;
+   *   static {
+   *     $assertionsDisabled = A.class.desiredAssertionStatus();
+   *   }
+   *
+   *   // method with "assert xxx";
+   *   void m() {
+   *     if (!$assertionsDisabled) {
+   *       if (xxx) {
+   *         throw new AssertionError(...);
+   *       }
+   *     }
+   *   }
+   * }
+   * </pre>
+   * With the rewriting below (and other rewritings) the resulting code is:
+   * <pre>
+   * class A {
+   *   void m() {
+   *   }
+   * }
+   * </pre>
+   */
   public void disableAssertions(IRCode code) {
     InstructionIterator iterator = code.instructionIterator();
     while (iterator.hasNext()) {
@@ -779,6 +617,193 @@ public class CodeRewriter {
         StaticGet staticGet = current.asStaticGet();
         if (staticGet.getField().name == dexItemFactory.assertionsDisabled) {
           iterator.replaceCurrentInstruction(code.createTrue());
+        }
+      }
+    }
+  }
+
+  // Check if the static put is a constant derived from the class holding the method.
+  // This checks for java.lang.Class.getName and java.lang.Class.getSimpleName.
+  private boolean isClassNameConstant(DexEncodedMethod method, StaticPut put) {
+    if (put.getField().type != dexItemFactory.stringType) {
+      return false;
+    }
+    if (put.inValue().definition != null && put.inValue().definition.isInvokeVirtual()) {
+      InvokeVirtual invoke = put.inValue().definition.asInvokeVirtual();
+      if ((invoke.getInvokedMethod() == dexItemFactory.classMethods.getSimpleName
+          || invoke.getInvokedMethod() == dexItemFactory.classMethods.getName)
+          && invoke.inValues().get(0).definition.isConstClass()
+          && invoke.inValues().get(0).definition.asConstClass().getValue()
+          == method.method.getHolder()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  public void collectClassInitializerDefaults(DexEncodedMethod method, IRCode code) {
+    if (!method.isClassInitializer()) {
+      return;
+    }
+
+    // Collect relevant static put which are dominated by the exit block, and not dominated by a
+    // static get.
+    // This does not check for instructions that can throw. However, as classes which throw in the
+    // class initializer are never visible to the program (see Java Virtual Machine Specification
+    // section 5.5, https://docs.oracle.com/javase/specs/jvms/se8/html/jvms-5.html#jvms-5.5), this
+    // does not matter (except maybe for removal of const-string instructions, but that is
+    // acceptable).
+    DominatorTree dominatorTree = new DominatorTree(code);
+    BasicBlock exit = code.getNormalExitBlock();
+    if (exit == null) {
+      return;
+    }
+    Map<DexField, StaticPut> puts = Maps.newIdentityHashMap();
+    for (BasicBlock block : dominatorTree.dominatorBlocks(exit)) {
+      InstructionListIterator iterator = block.listIterator(block.getInstructions().size());
+      while (iterator.hasPrevious()) {
+        Instruction current = iterator.previous();
+        if (current.isStaticPut()) {
+          StaticPut put = current.asStaticPut();
+          DexField field = put.getField();
+          if (field.getHolder() == method.method.getHolder()) {
+            if (put.inValue().isConstant()) {
+              if ((field.type.isClassType() || field.type.isArrayType())
+                  && put.inValue().getConstInstruction().isConstNumber() &&
+                  put.inValue().getConstInstruction().asConstNumber().isZero()) {
+                // Collect put of zero as a potential default value.
+                puts.put(put.getField(), put);
+              } else if (field.type.isPrimitiveType() || field.type == dexItemFactory.stringType) {
+                // Collect put as a potential default value.
+                puts.put(put.getField(), put);
+              }
+            } else if (isClassNameConstant(method, put)) {
+              // Collect put of class name constant as a potential default value.
+              puts.put(put.getField(), put);
+            }
+          }
+        }
+        if (current.isStaticGet()) {
+          // If a static field is read, any collected potential default value cannot be a
+          // default value.
+          if (puts.containsKey(current.asStaticGet().getField())) {
+            puts.remove(current.asStaticGet().getField());
+          }
+        }
+      }
+    }
+
+    if (!puts.isEmpty()) {
+      // Set initial values for static fields from the definitive static put instructions collected.
+      for (StaticPut put : puts.values()) {
+        DexField field = put.getField();
+        DexEncodedField encodedField = appInfo.definitionFor(field);
+        if (field.type == dexItemFactory.stringType) {
+          if (put.inValue().isConstant()) {
+            if (put.inValue().getConstInstruction().isConstNumber()) {
+              assert put.inValue().getConstInstruction().asConstNumber().isZero();
+              encodedField.staticValue = DexValueNull.NULL;
+            } else {
+              ConstString cnst = put.inValue().getConstInstruction().asConstString();
+              encodedField.staticValue = new DexValueString(cnst.getValue());
+            }
+          } else {
+            InvokeVirtual invoke = put.inValue().definition.asInvokeVirtual();
+            String name = method.method.getHolder().toSourceString();
+            if (invoke.getInvokedMethod() == dexItemFactory.classMethods.getSimpleName) {
+              String simpleName = name.substring(name.lastIndexOf('.') + 1);
+              encodedField.staticValue =
+                  new DexValueString(dexItemFactory.createString(simpleName));
+            } else {
+              assert invoke.getInvokedMethod() == dexItemFactory.classMethods.getName;
+              encodedField.staticValue = new DexValueString(dexItemFactory.createString(name));
+            }
+          }
+        } else if (field.type.isClassType() || field.type.isArrayType()) {
+          if (put.inValue().getConstInstruction().isConstNumber()
+              && put.inValue().getConstInstruction().asConstNumber().isZero()) {
+            encodedField.staticValue = DexValueNull.NULL;
+          } else {
+            throw new Unreachable("Unexpected default value for field type " + field.type + ".");
+          }
+        } else {
+          ConstNumber cnst = put.inValue().getConstInstruction().asConstNumber();
+          if (field.type == dexItemFactory.booleanType) {
+            encodedField.staticValue = DexValueBoolean.create(cnst.getBooleanValue());
+          } else if (field.type == dexItemFactory.byteType) {
+            encodedField.staticValue = DexValueByte.create((byte) cnst.getIntValue());
+          } else if (field.type == dexItemFactory.shortType) {
+            encodedField.staticValue = DexValueShort.create((short) cnst.getIntValue());
+          } else if (field.type == dexItemFactory.intType) {
+            encodedField.staticValue = DexValueInt.create(cnst.getIntValue());
+          } else if (field.type == dexItemFactory.longType) {
+            encodedField.staticValue = DexValueLong.create(cnst.getLongValue());
+          } else if (field.type == dexItemFactory.floatType) {
+            encodedField.staticValue = DexValueFloat.create(cnst.getFloatValue());
+          } else if (field.type == dexItemFactory.doubleType) {
+            encodedField.staticValue = DexValueDouble.create(cnst.getDoubleValue());
+          } else if (field.type == dexItemFactory.charType) {
+            encodedField.staticValue = DexValueChar.create((char) cnst.getIntValue());
+          } else {
+            throw new Unreachable("Unexpected field type " + field.type + ".");
+          }
+        }
+      }
+
+      // Remove the static put instructions now replaced by static filed initial values.
+      List<Instruction> toRemove = new ArrayList<>();
+      for (BasicBlock block : dominatorTree.dominatorBlocks(exit)) {
+        InstructionListIterator iterator = block.listIterator();
+        while (iterator.hasNext()) {
+          Instruction current = iterator.next();
+          if (current.isStaticPut() && puts.values().contains(current.asStaticPut())) {
+            iterator.remove();
+            // Collect, for removal, the instruction that created the value for the static put,
+            // if all users are gone. This is done even if these instructions can throw as for
+            // the current patterns matched these exceptions are not detectable.
+            StaticPut put = current.asStaticPut();
+            if (put.inValue().uniqueUsers().size() == 0) {
+              if (put.inValue().isConstString()) {
+                toRemove.add(put.inValue().definition);
+              } else if (put.inValue().definition.isInvokeVirtual()) {
+                toRemove.add(put.inValue().definition);
+              }
+            }
+          }
+        }
+      }
+
+      // Remove the instructions collected for removal.
+      if (toRemove.size() > 0) {
+        for (BasicBlock block : dominatorTree.dominatorBlocks(exit)) {
+          InstructionListIterator iterator = block.listIterator();
+          while (iterator.hasNext()) {
+            if (toRemove.contains(iterator.next())) {
+              iterator.remove();
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Due to inlining, we might see chains of casts on subtypes. It suffices to cast to the lowest
+   * subtype, as that will fail if a cast on a supertype would have failed.
+   */
+  public void removeCastChains(IRCode code) {
+    InstructionIterator it = code.instructionIterator();
+    while (it.hasNext()) {
+      Instruction current = it.next();
+      if (current.isCheckCast()
+          && current.outValue() != null && current.outValue().isUsed()
+          && current.outValue().numberOfPhiUsers() == 0) {
+        CheckCast checkCast = current.asCheckCast();
+        if (checkCast.outValue().uniqueUsers().stream().allMatch(
+            user -> user.isCheckCast()
+                && user.asCheckCast().getType().isSubtypeOf(checkCast.getType(), appInfo))) {
+          checkCast.outValue().replaceUsers(checkCast.inValues().get(0));
+          it.remove();
         }
       }
     }
@@ -808,68 +833,35 @@ public class CodeRewriter {
     assert code.isConsistentSSA();
   }
 
-  // Constants are canonicalized in the entry block. We split some of them when it is likely
-  // that having them canonicalized in the entry block will lead to poor code quality.
-  public void splitConstants(IRCode code) {
+  // Split constants that flow into ranged invokes. This gives the register allocator more
+  // freedom in assigning register to ranged invokes which can greatly reduce the number
+  // of register needed (and thereby code size as well).
+  public void splitRangeInvokeConstants(IRCode code) {
     for (BasicBlock block : code.blocks) {
-      // Split constants that flow into phis. It is likely that these constants will have moves
-      // generated for them anyway and we might as well insert a const instruction in the right
-      // predecessor block.
-      splitPhiConstants(code, block);
-      // Split constants that flow into ranged invokes. This gives the register allocator more
-      // freedom in assigning register to ranged invokes which can greatly reduce the number
-      // of register needed (and thereby code size as well).
-      splitRangedInvokeConstants(code, block);
-    }
-  }
-
-  private void splitRangedInvokeConstants(IRCode code, BasicBlock block) {
-    InstructionListIterator it = block.listIterator();
-    while (it.hasNext()) {
-      Instruction current = it.next();
-      if (current.isInvoke() && current.asInvoke().requiredArgumentRegisters() > 5) {
-        Invoke invoke = current.asInvoke();
-        it.previous();
-        Map<ConstNumber, ConstNumber> oldToNew = new HashMap<>();
-        for (int i = 0; i < invoke.inValues().size(); i++) {
-          Value value = invoke.inValues().get(i);
-          if (value.isConstant() && value.numberOfUsers() > 1) {
-            ConstNumber definition = value.getConstInstruction().asConstNumber();
-            Value originalValue = definition.outValue();
-            ConstNumber newNumber = oldToNew.get(definition);
-            if (newNumber == null) {
-              newNumber = ConstNumber.copyOf(code, definition);
-              it.add(newNumber);
-              oldToNew.put(definition, newNumber);
+      InstructionListIterator it = block.listIterator();
+      while (it.hasNext()) {
+        Instruction current = it.next();
+        if (current.isInvoke() && current.asInvoke().requiredArgumentRegisters() > 5) {
+          Invoke invoke = current.asInvoke();
+          it.previous();
+          Map<ConstNumber, ConstNumber> oldToNew = new HashMap<>();
+          for (int i = 0; i < invoke.inValues().size(); i++) {
+            Value value = invoke.inValues().get(i);
+            if (value.isConstNumber() && value.numberOfUsers() > 1) {
+              ConstNumber definition = value.getConstInstruction().asConstNumber();
+              Value originalValue = definition.outValue();
+              ConstNumber newNumber = oldToNew.get(definition);
+              if (newNumber == null) {
+                newNumber = ConstNumber.copyOf(code, definition);
+                it.add(newNumber);
+                oldToNew.put(definition, newNumber);
+              }
+              invoke.inValues().set(i, newNumber.outValue());
+              originalValue.removeUser(invoke);
+              newNumber.outValue().addUser(invoke);
             }
-            invoke.inValues().set(i, newNumber.outValue());
-            originalValue.removeUser(invoke);
-            newNumber.outValue().addUser(invoke);
           }
-        }
-        it.next();
-      }
-    }
-  }
-
-  private void splitPhiConstants(IRCode code, BasicBlock block) {
-    for (int i = 0; i < block.getPredecessors().size(); i++) {
-      Map<ConstNumber, ConstNumber> oldToNew = new IdentityHashMap<>();
-      BasicBlock predecessor = block.getPredecessors().get(i);
-      for (Phi phi : block.getPhis()) {
-        Value operand = phi.getOperand(i);
-        if (!operand.isPhi() && operand.isConstant()) {
-          ConstNumber definition = operand.getConstInstruction().asConstNumber();
-          ConstNumber newNumber = oldToNew.get(definition);
-          Value originalValue = definition.outValue();
-          if (newNumber == null) {
-            newNumber = ConstNumber.copyOf(code, definition);
-            oldToNew.put(definition, newNumber);
-            insertConstantInBlock(newNumber, predecessor);
-          }
-          phi.getOperands().set(i, newNumber.outValue());
-          originalValue.removePhiUser(phi);
-          newNumber.outValue().addPhiUser(phi);
+          it.next();
         }
       }
     }
@@ -886,7 +878,7 @@ public class CodeRewriter {
     List<Instruction> toInsertInThisBlock = new ArrayList<>();
     while (it.hasNext()) {
       Instruction instruction = it.next();
-      if (instruction.isConstNumber()) {
+      if (instruction.isConstNumber() && instruction.outValue().numberOfAllUsers() != 0) {
         // Collect the blocks for all users of the constant.
         List<BasicBlock> userBlocks = new LinkedList<>();
         for (Instruction user : instruction.outValue().uniqueUsers()) {
@@ -972,18 +964,16 @@ public class CodeRewriter {
     insertAt.add(instruction);
   }
 
-  private short[] computeArrayFilledData(
-      NewArrayEmpty newArray, int size, BasicBlock block, int elementSize) {
-    ConstNumber[] values = computeConstantArrayValues(newArray, block, size);
+  private short[] computeArrayFilledData(ConstInstruction[] values, int size, int elementSize) {
     if (values == null) {
       return null;
     }
     if (elementSize == 1) {
       short[] result = new short[(size + 1) / 2];
       for (int i = 0; i < size; i += 2) {
-        short value = (short) (values[i].getIntValue() & 0xFF);
+        short value = (short) (values[i].asConstNumber().getIntValue() & 0xFF);
         if (i + 1 < size) {
-          value |= (short) ((values[i + 1].getIntValue() & 0xFF) << 8);
+          value |= (short) ((values[i + 1].asConstNumber().getIntValue() & 0xFF) << 8);
         }
         result[i / 2] = value;
       }
@@ -993,7 +983,7 @@ public class CodeRewriter {
     int shortsPerConstant = elementSize / 2;
     short[] result = new short[size * shortsPerConstant];
     for (int i = 0; i < size; i++) {
-      long value = values[i].getRawValue();
+      long value = values[i].asConstNumber().getRawValue();
       for (int part = 0; part < shortsPerConstant; part++) {
         result[i * shortsPerConstant + part] = (short) ((value >> (16 * part)) & 0xFFFFL);
       }
@@ -1001,12 +991,12 @@ public class CodeRewriter {
     return result;
   }
 
-  private ConstNumber[] computeConstantArrayValues(
+  private ConstInstruction[] computeConstantArrayValues(
       NewArrayEmpty newArray, BasicBlock block, int size) {
     if (size > MAX_FILL_ARRAY_SIZE) {
       return null;
     }
-    ConstNumber[] values = new ConstNumber[size];
+    ConstInstruction[] values = new ConstInstruction[size];
     int remaining = size;
     Set<Instruction> users = newArray.outValue().uniqueUsers();
     // We allow the array instantiations to cross block boundaries as long as it hasn't encountered
@@ -1018,8 +1008,9 @@ public class CodeRewriter {
         Instruction instruction = it.next();
         // If we encounter an instruction that can throw an exception we need to bail out of the
         // optimization so that we do not transform half-initialized arrays into fully initialized
-        // arrays on exceptional edges.
-        if (instruction.instructionInstanceCanThrow()) {
+        // arrays on exceptional edges. If the block has no handlers it is not observable so
+        // we perform the rewriting.
+        if (block.hasCatchHandlers() && instruction.instructionInstanceCanThrow()) {
           return null;
         }
         if (!users.contains(instruction)) {
@@ -1031,16 +1022,15 @@ public class CodeRewriter {
           return null;
         }
         ArrayPut arrayPut = instruction.asArrayPut();
-        if (!arrayPut.source().isConstant()) {
+        if (!(arrayPut.source().isConstant() && arrayPut.index().isConstNumber())) {
           return null;
         }
-        assert arrayPut.index().isConstant();
         int index = arrayPut.index().getConstInstruction().asConstNumber().getIntValue();
         assert index >= 0 && index < values.length;
         if (values[index] != null) {
           return null;
         }
-        ConstNumber value = arrayPut.source().getConstInstruction().asConstNumber();
+        ConstInstruction value = arrayPut.source().getConstInstruction();
         values[index] = value;
         --remaining;
         if (remaining == 0) {
@@ -1053,7 +1043,7 @@ public class CodeRewriter {
     return null;
   }
 
-  private boolean isPrimitiveNewArrayWithConstantPositiveSize(Instruction instruction) {
+  private boolean isPrimitiveOrStringNewArrayWithPositiveSize(Instruction instruction) {
     if (!(instruction instanceof NewArrayEmpty)) {
       return false;
     }
@@ -1061,48 +1051,69 @@ public class CodeRewriter {
     if (!newArray.size().isConstant()) {
       return false;
     }
+    assert newArray.size().isConstNumber();
     int size = newArray.size().getConstInstruction().asConstNumber().getIntValue();
     if (size < 1) {
       return false;
     }
-    if (!newArray.type.isPrimitiveArrayType()) {
-      return false;
-    }
-    return true;
+    return newArray.type.isPrimitiveArrayType() || newArray.type == dexItemFactory.stringArrayType;
   }
 
   /**
-   * Replace NewArrayEmpty followed by stores of constants to all entries with NewArrayEmpty
-   * and FillArrayData.
+   * Replace new-array followed by stores of constants to all entries with new-array
+   * and fill-array-data / filled-new-array.
    */
   public void simplifyArrayConstruction(IRCode code) {
     for (BasicBlock block : code.blocks) {
       // Map from the array value to the number of array put instruction to remove for that value.
+      Map<Value, Instruction> instructionToInsertForArray = new HashMap<>();
       Map<Value, Integer> storesToRemoveForArray = new HashMap<>();
       // First pass: identify candidates and insert fill array data instruction.
       InstructionListIterator it = block.listIterator();
       while (it.hasNext()) {
         Instruction instruction = it.next();
-        if (!isPrimitiveNewArrayWithConstantPositiveSize(instruction)) {
+        if (!isPrimitiveOrStringNewArrayWithPositiveSize(instruction)) {
           continue;
         }
         NewArrayEmpty newArray = instruction.asNewArrayEmpty();
         int size = newArray.size().getConstInstruction().asConstNumber().getIntValue();
-        // If there is only one element it is typically smaller to generate the array put
-        // instruction instead of fill array data.
-        if (size == 1) {
+        ConstInstruction[] values = computeConstantArrayValues(newArray, block, size);
+        if (values == null) {
           continue;
         }
-        int elementSize = newArray.type.elementSizeForPrimitiveArrayType();
-        short[] contents = computeArrayFilledData(newArray, size, block, elementSize);
-        if (contents == null) {
-          continue;
+        if (newArray.type == dexItemFactory.stringArrayType) {
+          // Don't replace with filled-new-array if it requires more than 200 consecutive registers.
+          if (size > 200) {
+            continue;
+          }
+          List<Value> stringValues = new ArrayList<>(size);
+          for (ConstInstruction value : values) {
+            stringValues.add(value.outValue());
+          }
+          InvokeNewArray invoke = new InvokeNewArray(
+              dexItemFactory.stringArrayType, newArray.outValue(), stringValues);
+          it.detach();
+          for (Value value : newArray.inValues()) {
+            value.removeUser(newArray);
+          }
+          instructionToInsertForArray.put(newArray.outValue(), invoke);
+        } else {
+          // If there is only one element it is typically smaller to generate the array put
+          // instruction instead of fill array data.
+          if (size == 1) {
+            continue;
+          }
+          int elementSize = newArray.type.elementSizeForPrimitiveArrayType();
+          short[] contents = computeArrayFilledData(values, size, elementSize);
+          if (contents == null) {
+            continue;
+          }
+          int arraySize = newArray.size().getConstInstruction().asConstNumber().getIntValue();
+          NewArrayFilledData fillArray = new NewArrayFilledData(
+              newArray.outValue(), elementSize, arraySize, contents);
+          it.add(fillArray);
         }
         storesToRemoveForArray.put(newArray.outValue(), size);
-        int arraySize = newArray.size().getConstInstruction().asConstNumber().getIntValue();
-        NewArrayFilledData fillArray = new NewArrayFilledData(
-            newArray.outValue(), elementSize, arraySize, contents);
-        it.add(fillArray);
       }
       // Second pass: remove all the array put instructions for the array for which we have
       // inserted a fill array data instruction instead.
@@ -1114,9 +1125,18 @@ public class CodeRewriter {
             if (instruction.isArrayPut()) {
               Value array = instruction.asArrayPut().array();
               Integer toRemoveCount = storesToRemoveForArray.get(array);
-              if (toRemoveCount != null && toRemoveCount > 0) {
-                storesToRemoveForArray.put(array, toRemoveCount - 1);
-                it.remove();
+              if (toRemoveCount != null) {
+                if (toRemoveCount > 0) {
+                  storesToRemoveForArray.put(array, --toRemoveCount);
+                  it.remove();
+                }
+                if (toRemoveCount == 0) {
+                  storesToRemoveForArray.put(array, --toRemoveCount);
+                  Instruction construction = instructionToInsertForArray.get(array);
+                  if (construction != null) {
+                    it.add(construction);
+                  }
+                }
               }
             }
           }
@@ -1240,8 +1260,8 @@ public class CodeRewriter {
         If theIf = block.exit().asIf();
         List<Value> inValues = theIf.inValues();
         int cond;
-        if (inValues.get(0).isConstant()
-            && (theIf.isZeroTest() || inValues.get(1).isConstant())) {
+        if (inValues.get(0).isConstNumber()
+            && (theIf.isZeroTest() || inValues.get(1).isConstNumber())) {
           // Zero test with a constant of comparison between between two constants.
           if (theIf.isZeroTest()) {
             cond = inValues.get(0).getConstInstruction().asConstNumber().getIntValue();
@@ -1283,7 +1303,7 @@ public class CodeRewriter {
           }
         }
         assert theIf == block.exit();
-        replaceLastInstruction(block, new Goto());
+        block.replaceLastInstruction(new Goto());
         assert block.exit().isGoto();
         assert block.exit().asGoto().getTarget() == target;
       }
@@ -1301,30 +1321,23 @@ public class CodeRewriter {
     List<Value> inValues = theIf.inValues();
     Value leftValue = inValues.get(0);
     Value rightValue = inValues.get(1);
-    if (leftValue.isConstant() || rightValue.isConstant()) {
-      if (leftValue.isConstant()) {
+    if (leftValue.isConstNumber() || rightValue.isConstNumber()) {
+      if (leftValue.isConstNumber()) {
         int left = leftValue.getConstInstruction().asConstNumber().getIntValue();
         if (left == 0) {
           If ifz = new If(theIf.getType().forSwappedOperands(), rightValue);
-          replaceLastInstruction(block, ifz);
+          block.replaceLastInstruction(ifz);
           assert block.exit() == ifz;
         }
       } else {
-        assert rightValue.isConstant();
         int right = rightValue.getConstInstruction().asConstNumber().getIntValue();
         if (right == 0) {
           If ifz = new If(theIf.getType(), leftValue);
-          replaceLastInstruction(block, ifz);
+          block.replaceLastInstruction(ifz);
           assert block.exit() == ifz;
         }
       }
     }
-  }
-
-  private void replaceLastInstruction(BasicBlock block, Instruction instruction) {
-    InstructionListIterator iterator = block.listIterator(block.getInstructions().size());
-    iterator.previous();
-    iterator.replaceCurrentInstruction(instruction);
   }
 
   public void rewriteLongCompareAndRequireNonNull(IRCode code, InternalOptions options) {
@@ -1395,7 +1408,7 @@ public class CodeRewriter {
             iterator.previous();
             iterator.add(zero);
 
-            // Then replace the invoke instruction with NewArrayEmpty instruction.
+            // Then replace the invoke instruction with new-array instruction.
             Instruction next = iterator.next();
             assert current == next;
             NewArrayEmpty newArray = new NewArrayEmpty(destValue, zero.outValue(),
@@ -1430,7 +1443,7 @@ public class CodeRewriter {
   }
 
   private Value addConstString(IRCode code, InstructionListIterator iterator, String s) {
-    Value value = code.createValue(MoveType.OBJECT);;
+    Value value = code.createValue(MoveType.OBJECT);
     iterator.add(new ConstString(value, dexItemFactory.createString(s)));
     return value;
   }
@@ -1469,7 +1482,7 @@ public class CodeRewriter {
     iterator.add(new ConstString(value, dexItemFactory.createString("INVOKE ")));
     iterator.add(new InvokeVirtual(print, null, ImmutableList.of(out, value)));
 
-    value = code.createValue(MoveType.OBJECT);;
+    value = code.createValue(MoveType.OBJECT);
     iterator.add(
         new ConstString(value, dexItemFactory.createString(method.method.qualifiedName())));
     iterator.add(new InvokeVirtual(print, null, ImmutableList.of(out, value)));

@@ -81,6 +81,9 @@ final class LambdaClass {
         : factory.createMethod(lambdaClassType, constructorProto, rewriter.classConstructorName);
     this.instanceField = !stateless ? null
         : factory.createField(lambdaClassType, lambdaClassType, rewriter.instanceFieldName);
+
+    // We have to register this new class as a subtype of object.
+    rewriter.appInfo.registerNewType(type, factory.objectType);
   }
 
   // Generate unique lambda class type for lambda descriptor and instantiation point context.
@@ -441,7 +444,7 @@ final class LambdaClass {
       DexMethod implMethod = descriptor.implHandle.asMethod();
       DexClass implMethodHolder = definitionFor(implMethod.holder);
 
-      DexEncodedMethod[] directMethods = implMethodHolder.directMethods;
+      DexEncodedMethod[] directMethods = implMethodHolder.directMethods();
       for (int i = 0; i < directMethods.length; i++) {
         DexEncodedMethod encodedMethod = directMethods[i];
         if (implMethod.match(encodedMethod)) {
@@ -459,8 +462,7 @@ final class LambdaClass {
           DexCode dexCode = newMethod.getCode().asDexCode();
           dexCode.setDebugInfo(dexCode.debugInfoWithAdditionalFirstParameter(null));
           assert (dexCode.getDebugInfo() == null)
-              || (callTarget.proto.parameters.values.length
-              == dexCode.getDebugInfo().parameters.length);
+              || (callTarget.getArity() == dexCode.getDebugInfo().parameters.length);
           directMethods[i] = newMethod;
           return true;
         }
@@ -489,8 +491,8 @@ final class LambdaClass {
       DexEncodedMethod accessorEncodedMethod = new DexEncodedMethod(
           callTarget, accessorFlags, DexAnnotationSet.empty(), DexAnnotationSetRefList.empty(),
           new SynthesizedCode(new AccessorMethodSourceCode(LambdaClass.this)));
-      accessorClass.directMethods = appendMethod(
-          accessorClass.directMethods, accessorEncodedMethod);
+      accessorClass.setDirectMethods(appendMethod(
+          accessorClass.directMethods(), accessorEncodedMethod));
       rewriter.converter.optimizeSynthesizedMethod(accessorEncodedMethod);
       return true;
     }

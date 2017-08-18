@@ -95,6 +95,9 @@ abstract class BaseCommand {
     private CompilationMode mode;
     private int minApiLevel = Constants.DEFAULT_ANDROID_API;
 
+    // Internal flag used by CompatDx to ignore dex files in archives.
+    protected boolean ignoreDexInArchive = false;
+
     protected Builder(CompilationMode mode) {
       this(AndroidApp.builder(), mode);
     }
@@ -108,6 +111,7 @@ abstract class BaseCommand {
       assert mode != null;
       this.app = builder;
       this.mode = mode;
+      app.setIgnoreDexInArchive(ignoreDexInArchive);
     }
 
     abstract B self();
@@ -219,9 +223,53 @@ abstract class BaseCommand {
       return self();
     }
 
-    /** Set the main-dex list file. */
-    public B setMainDexListFile(Path file) {
-      app.setMainDexListFile(file);
+    /**
+     * Add main-dex list files.
+     *
+     * Each line in each of the files specifies one class to keep in the primary dex file
+     * (<code>classes.dex</code>).
+     *
+     * A class is specified using the following format: "com/example/MyClass.class". That is
+     * "/" as separator between package components, and a trailing ".class".
+     */
+    public B addMainDexListFiles(Path... files) throws IOException {
+      app.addMainDexListFiles(files);
+      return self();
+    }
+
+    /**
+     * Add main-dex list files.
+     *
+     * @see #addMainDexListFiles(Path...)
+     */
+    public B addMainDexListFiles(Collection<Path> files) throws IOException {
+      app.addMainDexListFiles(files);
+      return self();
+    }
+
+    /**
+     * Add main-dex classes.
+     *
+     * Add classes to keep in the primary dex file (<code>classes.dex</code>).
+     *
+     * NOTE: The name of the classes is specified using the Java fully qualified names format
+     * (e.g. "com.example.MyClass"), and <i>not</i> the format used by the main-dex list file.
+     */
+    public B addMainDexClasses(String... classes) {
+      app.addMainDexClasses(classes);
+      return self();
+    }
+
+    /**
+     * Add main-dex classes.
+     *
+     * Add classes to keep in the primary dex file (<code>classes.dex</code>).
+     *
+     * NOTE: The name of the classes is specified using the Java fully qualified names format
+     * (e.g. "com.example.MyClass"), and <i>not</i> the format used by the main-dex list file.
+     */
+    public B addMainDexClasses(Collection<String> classes) {
+      app.addMainDexClasses(classes);
       return self();
     }
 
@@ -248,6 +296,10 @@ abstract class BaseCommand {
     }
 
     protected void validate() throws CompilationException {
+      if (app.hasMainDexList() && outputMode == OutputMode.FilePerClass) {
+        throw new CompilationException(
+            "Option --main-dex-list cannot be used with --file-per-class");
+      }
       FileUtils.validateOutputFile(outputPath);
     }
   }

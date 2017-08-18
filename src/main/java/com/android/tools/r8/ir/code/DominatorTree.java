@@ -87,6 +87,62 @@ public class DominatorTree {
     return dominator;
   }
 
+  /**
+   * Returns an iterator over all blocks dominated by dominator, including dominator itself.
+   */
+  public Iterable<BasicBlock> dominatedBlocks(BasicBlock domintator) {
+    return () -> new Iterator<BasicBlock>() {
+      private int current = domintator.getNumber();
+
+      @Override
+      public boolean hasNext() {
+        return dominatedBy(sorted[current], domintator);
+      }
+
+      @Override
+      public BasicBlock next() {
+        if (!hasNext()) {
+          return null;
+        } else {
+          return sorted[current++];
+        }
+      }
+    };
+  }
+
+  /**
+   * Returns an iterator over all dominator blocks of <code>dominated</code>.
+   *
+   * Iteration order is always the immediate dominator of the previously returned block. The
+   * iteration starts by returning <code>dominated</code>.
+   */
+  public Iterable<BasicBlock> dominatorBlocks(BasicBlock dominated) {
+    return () -> new Iterator<BasicBlock>() {
+      private BasicBlock current = dominated;
+
+      @Override
+      public boolean hasNext() {
+        return current != null;
+      }
+
+      @Override
+      public BasicBlock next() {
+        if (!hasNext()) {
+          return null;
+        } else {
+          BasicBlock result = current;
+          if (current.getNumber() == 0) {
+            current = null;
+          } else {
+            current = immediateDominator(current);
+            assert current != result;
+          }
+          return result;
+        }
+      }
+    };
+  }
+
   public BasicBlock[] getSortedBlocks() {
     return sorted;
   }

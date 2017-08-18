@@ -4,8 +4,11 @@
 package com.android.tools.r8.ir.code;
 
 import com.android.tools.r8.errors.Unreachable;
+import com.android.tools.r8.graph.AppInfoWithSubtyping;
 import com.android.tools.r8.graph.DebugLocalInfo;
+import com.android.tools.r8.graph.DexType;
 import com.android.tools.r8.ir.conversion.DexBuilder;
+import com.android.tools.r8.ir.optimize.Inliner.Constraint;
 import com.android.tools.r8.utils.InternalOptions;
 import com.android.tools.r8.utils.StringUtils;
 import it.unimi.dsi.fastutil.ints.Int2ReferenceMap;
@@ -18,6 +21,7 @@ public class DebugLocalsChange extends Instruction {
   public DebugLocalsChange(
       Int2ReferenceMap<DebugLocalInfo> ending, Int2ReferenceMap<DebugLocalInfo> starting) {
     super(null);
+    assert !ending.isEmpty() || !starting.isEmpty();
     this.ending = ending;
     this.starting = starting;
   }
@@ -48,7 +52,9 @@ public class DebugLocalsChange extends Instruction {
   @Override
   public boolean identicalNonValueParts(Instruction other) {
     assert other.isDebugLocalsChange();
-    return false;
+    DebugLocalsChange o = (DebugLocalsChange) other;
+    return DebugLocalInfo.localsInfoMapsEqual(ending, o.ending)
+        && DebugLocalInfo.localsInfoMapsEqual(starting, o.starting);
   }
 
   @Override
@@ -80,5 +86,10 @@ public class DebugLocalsChange extends Instruction {
     builder.append(", starting: ");
     StringUtils.append(builder, starting.int2ReferenceEntrySet());
     return builder.toString();
+  }
+
+  @Override
+  public Constraint inliningConstraint(AppInfoWithSubtyping info, DexType holder) {
+    return Constraint.ALWAYS;
   }
 }

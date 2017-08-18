@@ -4,8 +4,12 @@
 package com.android.tools.r8.ir.optimize;
 
 import com.android.tools.r8.graph.AppInfoWithSubtyping;
-import com.android.tools.r8.graph.DexCode;
+import com.android.tools.r8.graph.DexAccessFlags;
+import com.android.tools.r8.graph.DexClass;
+import com.android.tools.r8.graph.DexEncodedField;
 import com.android.tools.r8.graph.DexEncodedMethod;
+import com.android.tools.r8.graph.DexField;
+import com.android.tools.r8.graph.DexMethod;
 import com.android.tools.r8.graph.DexType;
 import com.android.tools.r8.graph.GraphLense;
 import com.android.tools.r8.ir.code.BasicBlock;
@@ -31,10 +35,9 @@ import java.util.List;
 import java.util.ListIterator;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 public class Inliner {
-
-  private static final int INLINING_INSTRUCTION_LIMIT = 5;
 
   protected final AppInfoWithSubtyping appInfo;
   private final GraphLense graphLense;
@@ -61,50 +64,43 @@ public class Inliner {
     return result;
   }
 
-  public Constraint identifySimpleMethods(IRCode code, DexEncodedMethod method) {
-    DexCode dex = method.getCode().asDexCode();
-    // We have generated code for a method and we want to figure out whether the method is a
-    // candidate for inlining. The code is the final IR after optimizations.
-    if (dex.instructions.length > INLINING_INSTRUCTION_LIMIT) {
-      return Constraint.NEVER;
-    }
+  public Constraint computeInliningConstraint(IRCode code, DexEncodedMethod method) {
     Constraint result = Constraint.ALWAYS;
-    ListIterator<BasicBlock> iterator = code.listIterator();
-    assert iterator.hasNext();
-    BasicBlock block = iterator.next();
-    BasicBlock nextBlock;
-    do {
-      nextBlock = iterator.hasNext() ? iterator.next() : null;
-      InstructionListIterator it = block.listIterator();
-      while (it.hasNext()) {
-        Instruction instruction = it.next();
-        Constraint state = instructionAllowedForInlining(method, instruction);
-        if (state == Constraint.NEVER) {
-          return Constraint.NEVER;
-        }
-        if (state.ordinal() < result.ordinal()) {
-          result = state;
-        }
+    InstructionIterator it = code.instructionIterator();
+    while (it.hasNext()) {
+      Instruction instruction = it.next();
+      Constraint state = instructionAllowedForInlining(method, instruction);
+      if (state == Constraint.NEVER) {
+        return Constraint.NEVER;
       }
-      block = nextBlock;
-    } while (block != null);
+      if (state.ordinal() < result.ordinal()) {
+        result = state;
+      }
+    }
     return result;
   }
 
   boolean hasInliningAccess(DexEncodedMethod method, DexEncodedMethod target) {
-    if (target.accessFlags.isPublic()) {
+    if (!isVisibleWithFlags(target.method.holder, method.method.holder, target.accessFlags)) {
+      return false;
+    }
+    // The class needs also to be visible for us to have access.
+    DexClass targetClass = appInfo.definitionFor(target.method.holder);
+    return isVisibleWithFlags(target.method.holder, method.method.holder, targetClass.accessFlags);
+  }
+
+  private boolean isVisibleWithFlags(DexType target, DexType context, DexAccessFlags flags) {
+    if (flags.isPublic()) {
       return true;
     }
-    DexType methodHolder = method.method.getHolder();
-    DexType targetHolder = target.method.getHolder();
-    if (target.accessFlags.isPrivate()) {
-      return methodHolder == targetHolder;
+    if (flags.isPrivate()) {
+      return target == context;
     }
-    if (target.accessFlags.isProtected() &&
-        methodHolder.isSubtypeOf(targetHolder, appInfo)) {
-      return true;
+    if (flags.isProtected()) {
+      return context.isSubtypeOf(target, appInfo) || target.isSamePackage(context);
     }
-    return methodHolder.isSamePackage(targetHolder);
+    // package-private
+    return target.isSamePackage(context);
   }
 
   synchronized DexEncodedMethod doubleInlining(DexEncodedMethod method,
@@ -134,23 +130,80 @@ public class Inliner {
       OptimizationFeedback feedback) {
     if (doubleInlineCallers.size() > 0) {
       applyDoubleInlining = true;
-      for (DexEncodedMethod method : doubleInlineCallers) {
+      List<DexEncodedMethod> methods = doubleInlineCallers
+          .stream()
+          .sorted(DexEncodedMethod::slowCompare)
+          .collect(Collectors.toList());
+      for (DexEncodedMethod method : methods) {
         converter.processMethod(method, feedback, Outliner::noProcessing);
         assert method.isProcessed();
       }
     }
   }
 
+  /**
+   * Encodes the constraints for inlining a method's instructions into a different context.
+   * <p>
+   * This only takes the instructions into account and not whether a method should be inlined
+   * or what reason for inlining it might have. Also, it does not take the visibility of the
+   * method itself into account.
+   */
   public enum Constraint {
     // The ordinal values are important so please do not reorder.
-    NEVER,    // Never inline this.
-    PRIVATE,  // Only inline this into methods with same holder.
-    PACKAGE,  // Only inline this into methods with holders from same package.
-    ALWAYS,   // No restrictions for inlining this.
+    NEVER,     // Never inline this.
+    SAMECLASS, // Only inline this into methods with same holder.
+    PACKAGE,   // Only inline this into methods with holders from same package.
+    SUBCLASS,  // Only inline this into methods with holders from a subclass.
+    ALWAYS;    // No restrictions for inlining this.
+
+    static {
+      assert NEVER.ordinal() < SAMECLASS.ordinal();
+      assert SAMECLASS.ordinal() < PACKAGE.ordinal();
+      assert PACKAGE.ordinal() < SUBCLASS.ordinal();
+      assert SUBCLASS.ordinal() < ALWAYS.ordinal();
+    }
+
+    public static Constraint deriveConstraint(DexType contextHolder, DexType targetHolder,
+        DexAccessFlags flags, AppInfoWithSubtyping appInfo) {
+      if (flags.isPublic()) {
+        return ALWAYS;
+      } else if (flags.isPrivate()) {
+        return targetHolder == contextHolder ? SAMECLASS : NEVER;
+      } else if (flags.isProtected()) {
+        if (targetHolder.isSamePackage(contextHolder)) {
+          // Even though protected, this is visible via the same package from the context.
+          return PACKAGE;
+        } else if (contextHolder.isSubtypeOf(targetHolder, appInfo)) {
+          return SUBCLASS;
+        }
+        return NEVER;
+      } else {
+      /* package-private */
+        return targetHolder.isSamePackage(contextHolder) ? PACKAGE : NEVER;
+      }
+    }
+
+    public static Constraint classIsVisible(DexType context, DexType clazz,
+        AppInfoWithSubtyping appInfo) {
+      DexClass definition = appInfo.definitionFor(clazz);
+      return definition == null ? NEVER
+          : deriveConstraint(context, clazz, definition.accessFlags, appInfo);
+    }
+
+    public static Constraint min(Constraint one, Constraint other) {
+      return one.ordinal() < other.ordinal() ? one : other;
+    }
   }
 
+  /**
+   * Encodes the reason why a method should be inlined.
+   * <p>
+   * This is independent of determining whether a method can be inlined, except for the FORCE
+   * state, that will inline a method irrespective of visibility and instruction checks.
+   */
   public enum Reason {
     FORCE,         // Inlinee is marked for forced inlining (bridge method or renamed constructor).
+    ALWAYS,        // Inlinee is marked for inlining due to alwaysinline directive.
     SINGLE_CALLER, // Inlinee has precisely one caller.
     DUAL_CALLER,   // Inlinee has precisely two callers.
     SIMPLE,        // Inlinee has simple code suitable for inlining.
@@ -160,15 +213,15 @@ public class Inliner {
 
     public final DexEncodedMethod target;
     public final Invoke invoke;
-    public final Reason reason;
+    final Reason reason;
 
-    public InlineAction(DexEncodedMethod target, Invoke invoke, Reason reason) {
+    InlineAction(DexEncodedMethod target, Invoke invoke, Reason reason) {
       this.target = target;
       this.invoke = invoke;
       this.reason = reason;
     }
 
-    public boolean forceInline() {
+    boolean forceInline() {
       return reason != Reason.SIMPLE;
     }
 
@@ -199,48 +252,66 @@ public class Inliner {
     return numOfInstructions;
   }
 
-  private boolean legalConstructorInline(DexEncodedMethod method, IRCode code) {
+  private boolean legalConstructorInline(DexEncodedMethod method,
+      InvokeMethod invoke, IRCode code) {
     // In the Java VM Specification section "4.10.2.4. Instance Initialization Methods and
     // Newly Created Objects" it says:
     //
     // Before that method invokes another instance initialization method of myClass or its direct
     // superclass on this, the only operation the method can perform on this is assigning fields
     // declared within myClass.
-    //
 
-    // Allow inlining a constructor into a constructor, as the constructor code is expected to
-    // adhere to the VM specification.
-    if (method.accessFlags.isConstructor()) {
+    // Allow inlining a constructor into a constructor of the same class, as the constructor code
+    // is expected to adhere to the VM specification.
+    DexType methodHolder = method.method.holder;
+    boolean methodIsConstructor = method.isInstanceInitializer();
+    if (methodIsConstructor && methodHolder == invoke.asInvokeMethod().getInvokedMethod().holder) {
       return true;
     }
 
     // Don't allow inlining a constructor into a non-constructor if the first use of the
     // un-initialized object is not an argument of an invoke of <init>.
+    // Also, we cannot inline a constructor if it initializes final fields, as such is only allowed
+    // from within a constructor of the corresponding class.
+    // Lastly, we can only inline a constructor, if its own <init> call is on the method's class. If
+    // we inline into a constructor, calls to super.<init> are also OK.
     InstructionIterator iterator = code.instructionIterator();
     Instruction instruction = iterator.next();
     // A constructor always has the un-initialized object as the first argument.
     assert instruction.isArgument();
     Value unInitializedObject = instruction.outValue();
+    boolean seenSuperInvoke = false;
     while (iterator.hasNext()) {
       instruction = iterator.next();
       if (instruction.inValues().contains(unInitializedObject)) {
-        return instruction.isInvokeDirect()
-            && appInfo.dexItemFactory
-            .isConstructor(instruction.asInvokeDirect().getInvokedMethod());
+        if (instruction.isInvokeDirect() && !seenSuperInvoke) {
+          DexMethod target = instruction.asInvokeDirect().getInvokedMethod();
+          seenSuperInvoke = appInfo.dexItemFactory.isConstructor(target);
+          if (seenSuperInvoke
+              // Calls to init on same class are always OK.
+              && target.holder != methodHolder
+              // If we are inlining into a constructor, calls to superclass init are OK.
+              && (!methodHolder.isImmediateSubtypeOf(target.holder) || !methodIsConstructor)) {
+            return false;
+          }
+        }
+        if (!seenSuperInvoke) {
+          return false;
+        }
+      }
+      if (instruction.isInstancePut()) {
+        // Fields may not be initialized outside of a constructor.
+        if (!methodIsConstructor) {
+          return false;
+        }
+        DexField field = instruction.asInstancePut().getField();
+        DexEncodedField target = appInfo.lookupInstanceTarget(field.getHolder(), field);
+        if (target != null && target.accessFlags.isFinal()) {
+          return false;
+        }
       }
     }
-    assert false : "Execution should never reach this point";
-    return false;
-  }
-
-  /// Computer the receiver value for the holder method.
-  private Value receiverValue(DexEncodedMethod method, IRCode code) {
-    // Ignore static methods.
-    if (method.accessFlags.isStatic()) {
-      return null;
-    }
-    // Find the outValue of the first argument instruction in the first block.
-    return code.collectArguments().get(0);
+    return true;
   }
 
   public void performInlining(DexEncodedMethod method, IRCode code, CallGraph callGraph) {
@@ -250,8 +321,7 @@ public class Inliner {
       return;
     }
     computeReceiverMustBeNonNull(code);
-    Value receiver = receiverValue(method, code);
-    InliningOracle oracle = new InliningOracle(this, method, receiver, callGraph);
+    InliningOracle oracle = new InliningOracle(this, method, callGraph);
 
     List<BasicBlock> blocksToRemove = new ArrayList<>();
     ListIterator<BasicBlock> blockIterator = code.listIterator();
@@ -272,15 +342,14 @@ public class Inliner {
               // The declared target cannot be found so skip inlining.
               continue;
             }
-            boolean forceInline = result.reason == Reason.FORCE;
-            if (!target.isProcessed() && !forceInline) {
+            if (!(target.isProcessed() || result.reason == Reason.FORCE)) {
               // Do not inline code that was not processed unless we have to force inline.
               continue;
             }
             IRCode inlinee = result
                 .buildIR(code.valueNumberGenerator, appInfo, graphLense, options);
             if (inlinee != null) {
-              // TODO(sgjesse): Get rid of this additional check by improved inlining.
+              // TODO(64432527): Get rid of this additional check by improved inlining.
               if (block.hasCatchHandlers() && inlinee.getNormalExitBlock() == null) {
                 continue;
               }
@@ -291,20 +360,16 @@ public class Inliner {
               // If this code did not go through the full pipeline, apply inlining to make sure
               // that force inline targets get processed.
               if (!target.isProcessed()) {
-                assert forceInline;
+                assert result.reason == Reason.FORCE;
                 if (Log.ENABLED) {
                   Log.verbose(getClass(), "Forcing extra inline on " + target.toSourceString());
                 }
                 performInlining(target, inlinee, callGraph);
               }
               // Make sure constructor inlining is legal.
-              if (target.accessFlags.isConstructor() && !legalConstructorInline(method, inlinee)) {
-                continue;
-              }
-              // Ensure the container is compatible with the target.
-             if (!forceInline
-                 && !result.target.isPublicInlining()
-                 && (method.method.getHolder() != result.target.method.getHolder())) {
+              assert !target.isClassInitializer();
+              if (target.isInstanceInitializer()
+                  && !legalConstructorInline(method, invoke, inlinee)) {
                 continue;
               }
               DexType downcast = null;

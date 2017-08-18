@@ -8,6 +8,7 @@ import com.android.tools.r8.CompilationException;
 import com.android.tools.r8.CompilationMode;
 import com.android.tools.r8.R8RunArtTestsTest.CompilerUnderTest;
 import com.android.tools.r8.shaking.ProguardRuleParserException;
+import com.android.tools.r8.utils.AndroidApp;
 import java.io.IOException;
 import java.util.concurrent.ExecutionException;
 import org.junit.Test;
@@ -18,8 +19,14 @@ public class R8GMSCoreV10DeployJarVerificationTest extends GMSCoreDeployJarVerif
   public void buildFromDeployJar()
       // TODO(tamaskenez): set hasReference = true when we have the noshrink file for V10
       throws ExecutionException, IOException, ProguardRuleParserException, CompilationException {
-    buildFromDeployJar(
+    AndroidApp app1 = buildFromDeployJar(
         CompilerUnderTest.R8, CompilationMode.RELEASE,
         GMSCoreCompilationTestBase.GMSCORE_V10_DIR, false);
+    AndroidApp app2 = buildFromDeployJar(
+        CompilerUnderTest.R8, CompilationMode.RELEASE,
+        GMSCoreCompilationTestBase.GMSCORE_V10_DIR, false);
+
+    // Verify that the result of the two compilations was the same.
+    assertIdenticalApplications(app1, app2);
   }
 }

@@ -28,11 +28,11 @@ import com.android.tools.r8.utils.InternalOptions;
 import com.android.tools.r8.utils.ListUtils;
 import com.android.tools.r8.utils.StringUtils;
 import com.google.common.collect.HashMultiset;
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Multiset;
-import com.google.common.collect.Multiset.Entry;
 import com.google.common.collect.Multisets;
 import it.unimi.dsi.fastutil.ints.Int2ReferenceMap;
+import it.unimi.dsi.fastutil.ints.Int2ReferenceMap.Entry;
+import it.unimi.dsi.fastutil.ints.Int2ReferenceMaps;
 import it.unimi.dsi.fastutil.ints.Int2ReferenceOpenHashMap;
 import it.unimi.dsi.fastutil.ints.IntArraySet;
 import it.unimi.dsi.fastutil.ints.IntIterator;
@@ -76,6 +76,7 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
   }
 
   private static class LocalRange implements Comparable<LocalRange> {
+    final Value value;
     final DebugLocalInfo local;
     final int register;
     final int start;
@@ -83,6 +84,7 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
 
     LocalRange(Value value, int register, int start, int end) {
       assert value.getLocalInfo() != null;
+      this.value = value;
       this.local = value.getLocalInfo();
       this.register = register;
       this.start = start;
@@ -253,7 +255,7 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
           // information, we always use the argument register whenever a local corresponds to an
           // argument value. That avoids ending and restarting locals whenever we move arguments
           // to lower register.
-          int register = getRegisterForValue(value, value.isArgument() ? 0 : start);
+          int register = getArgumentOrAllocateRegisterForValue(value, start);
           ranges.add(new LocalRange(value, register, start, nextEnd));
           Integer nextStart = nextInRange(nextEnd, end, starts);
           if (nextStart == null) {
@@ -263,7 +265,8 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
           start = nextStart;
         }
         if (start >= 0) {
-          ranges.add(new LocalRange(value, getRegisterForValue(value, start), start, end));
+          ranges.add(new LocalRange(value, getArgumentOrAllocateRegisterForValue(value, start),
+              start, end));
         }
       }
     }
@@ -288,11 +291,48 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
     }
 
     for (BasicBlock block : blocks) {
-      boolean blockEntry = true;
       ListIterator<Instruction> instructionIterator = block.listIterator();
+      // Close ranges up-to and including the first instruction. Ends are exclusive so the range is
+      // closed at entry.
+      int entryIndex = block.entry().getNumber();
+      {
+        ListIterator<LocalRange> it = openRanges.listIterator(0);
+        while (it.hasNext()) {
+          LocalRange openRange = it.next();
+          if (openRange.end <= entryIndex) {
+            it.remove();
+            assert currentLocals.get(openRange.register) == openRange.local;
+            currentLocals.remove(openRange.register);
+          }
+        }
+      }
+      // Open ranges up-to but excluding the first instruction. Starts are inclusive but entry is
+      // prior to the first instruction.
+      while (nextStartingRange != null && nextStartingRange.start < entryIndex) {
+        // If the range is live at this index open it.
+        if (entryIndex < nextStartingRange.end) {
+          openRanges.add(nextStartingRange);
+          assert !currentLocals.containsKey(nextStartingRange.register);
+          currentLocals.put(nextStartingRange.register, nextStartingRange.local);
+        }
+        nextStartingRange = rangeIterator.hasNext() ? rangeIterator.next() : null;
+      }
+      if (block.entry().isMoveException()) {
+        fixupLocalsLiveAtMoveException(block, instructionIterator, openRanges, currentLocals);
+      } else {
+        block.setLocalsAtEntry(new Int2ReferenceOpenHashMap<>(currentLocals));
+      }
+      int spillCount = 0;
       while (instructionIterator.hasNext()) {
         Instruction instruction = instructionIterator.next();
         int index = instruction.getNumber();
+        if (index == -1) {
+          spillCount++;
+          continue;
+        }
+        // If there is more than one spill instruction we may need to end clobbered locals.
+        Int2ReferenceMap<DebugLocalInfo> preSpillLocals =
+            spillCount > 1 ? new Int2ReferenceOpenHashMap<>(currentLocals) : null;
         ListIterator<LocalRange> it = openRanges.listIterator(0);
         Int2ReferenceMap<DebugLocalInfo> ending = new Int2ReferenceOpenHashMap<>();
         Int2ReferenceMap<DebugLocalInfo> starting = new Int2ReferenceOpenHashMap<>();
@@ -307,8 +347,8 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
           }
         }
         while (nextStartingRange != null && nextStartingRange.start <= index) {
-          // If the full range is between the two debug positions ignore it.
-          if (nextStartingRange.end > index) {
+          // If the range is live at this index open it.
+          if (index < nextStartingRange.end) {
             openRanges.add(nextStartingRange);
             assert !currentLocals.containsKey(nextStartingRange.register);
             currentLocals.put(nextStartingRange.register, nextStartingRange.local);
@@ -317,18 +357,27 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
           }
           nextStartingRange = rangeIterator.hasNext() ? rangeIterator.next() : null;
         }
-        if (blockEntry) {
-          blockEntry = false;
-          block.setLocalsAtEntry(new Int2ReferenceOpenHashMap<>(currentLocals));
-        } else if (localsChanged && shouldEmitChangesAtInstruction(instruction)) {
+        if (preSpillLocals != null) {
+          for (int i = 0; i <= spillCount; i++) {
+            instructionIterator.previous();
+          }
+          Int2ReferenceMap<DebugLocalInfo> clobbered =
+              endClobberedLocals(instructionIterator, preSpillLocals, currentLocals);
+          for (Entry<DebugLocalInfo> entry : clobbered.int2ReferenceEntrySet()) {
+            assert ending.get(entry.getIntKey()) == entry.getValue();
+            ending.remove(entry.getIntKey());
+          }
+        }
+        spillCount = 0;
+        if (localsChanged && shouldEmitChangesAtInstruction(instruction)) {
           DebugLocalsChange change = createLocalsChange(ending, starting);
           if (change != null) {
             if (instruction.isDebugPosition() || instruction.isJumpInstruction()) {
               instructionIterator.previous();
-              instructionIterator.add(new DebugLocalsChange(ending, starting));
+              instructionIterator.add(change);
               instructionIterator.next();
             } else {
-              instructionIterator.add(new DebugLocalsChange(ending, starting));
+              instructionIterator.add(change);
             }
           }
         }
@@ -337,13 +386,109 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
     }
   }
 
+  private void fixupLocalsLiveAtMoveException(
+      BasicBlock block,
+      ListIterator<Instruction> instructionIterator,
+      List<LocalRange> openRanges,
+      Int2ReferenceMap<DebugLocalInfo> finalLocals) {
+    Int2ReferenceMap<DebugLocalInfo> initialLocals = new Int2ReferenceOpenHashMap<>();
+    int exceptionalIndex = block.getPredecessors().get(0).exceptionalExit().getNumber();
+    for (LocalRange open : openRanges) {
+      int exceptionalRegister = getArgumentOrAllocateRegisterForValue(open.value, exceptionalIndex);
+      initialLocals.put(exceptionalRegister, open.local);
+    }
+    block.setLocalsAtEntry(new Int2ReferenceOpenHashMap<>(initialLocals));
+    Instruction entry = instructionIterator.next();
+    assert block.entry() == entry;
+    assert block.entry().isMoveException();
+    // Moves may have clobber current locals so they must be closed.
+    Int2ReferenceMap<DebugLocalInfo> clobbered =
+        endClobberedLocals(instructionIterator, initialLocals, finalLocals);
+    for (Entry<DebugLocalInfo> ended : clobbered.int2ReferenceEntrySet()) {
+      assert initialLocals.get(ended.getIntKey()) == ended.getValue();
+      initialLocals.remove(ended.getIntKey());
+    }
+    instructionIterator.previous();
+    // Compute the final change in locals and insert it after the last move.
+    Int2ReferenceMap<DebugLocalInfo> ending = new Int2ReferenceOpenHashMap<>();
+    Int2ReferenceMap<DebugLocalInfo> starting = new Int2ReferenceOpenHashMap<>();
+    for (Entry<DebugLocalInfo> initialLocal : initialLocals.int2ReferenceEntrySet()) {
+      if (finalLocals.get(initialLocal.getIntKey()) != initialLocal.getValue()) {
+        ending.put(initialLocal.getIntKey(), initialLocal.getValue());
+      }
+    }
+    for (Entry<DebugLocalInfo> finalLocal : finalLocals.int2ReferenceEntrySet()) {
+      if (initialLocals.get(finalLocal.getIntKey()) != finalLocal.getValue()) {
+        starting.put(finalLocal.getIntKey(), finalLocal.getValue());
+      }
+    }
+    DebugLocalsChange change = createLocalsChange(ending, starting);
+    if (change != null) {
+      instructionIterator.add(change);
+    }
+  }
+
+  private Int2ReferenceMap<DebugLocalInfo> endClobberedLocals(
+      ListIterator<Instruction> instructionIterator,
+      Int2ReferenceMap<DebugLocalInfo> initialLocals,
+      Int2ReferenceMap<DebugLocalInfo> finalLocals) {
+    if (!options.singleStepDebug) {
+      while (instructionIterator.hasNext()) {
+        if (instructionIterator.next().getNumber() != -1) {
+          break;
+        }
+      }
+      return Int2ReferenceMaps.emptyMap();
+    }
+    // TODO(zerny): Investigate supporting accurate single stepping through spill instructions.
+    // The current code should preferably be updated to account for moving locals and not just
+    // end their scope.
+    int spillCount;
+    int firstClobberedMove = -1;
+    Int2ReferenceMap<DebugLocalInfo> clobberedLocals = Int2ReferenceMaps.emptyMap();
+    for (spillCount = 0; instructionIterator.hasNext(); spillCount++) {
+      Instruction next = instructionIterator.next();
+      if (next.getNumber() != -1) {
+        break;
+      }
+      if (next.isMove()) {
+        Move move = next.asMove();
+        int dst = getRegisterForValue(move.dest(), move.getNumber());
+        DebugLocalInfo initialLocal = initialLocals.get(dst);
+        if (initialLocal != null && initialLocal != finalLocals.get(dst)) {
+          if (firstClobberedMove == -1) {
+            firstClobberedMove = spillCount;
+            clobberedLocals = new Int2ReferenceOpenHashMap<>();
+          }
+          clobberedLocals.put(dst, initialLocal);
+        }
+      }
+    }
+    // Add an initial local change for all clobbered locals after the first clobbered local.
+    if (firstClobberedMove != -1) {
+      int tail = spillCount - firstClobberedMove;
+      for (int i = 0; i < tail; i++) {
+        instructionIterator.previous();
+      }
+      instructionIterator.add(new DebugLocalsChange(
+          clobberedLocals, Int2ReferenceMaps.emptyMap()));
+      for (int i = 0; i < tail; i++) {
+        instructionIterator.next();
+      }
+    }
+    return clobberedLocals;
+  }
+
   private DebugLocalsChange createLocalsChange(
       Int2ReferenceMap<DebugLocalInfo> ending, Int2ReferenceMap<DebugLocalInfo> starting) {
+    if (ending.isEmpty() && starting.isEmpty()) {
+      return null;
+    }
     if (ending.isEmpty() || starting.isEmpty()) {
       return new DebugLocalsChange(ending, starting);
     }
     IntSet unneeded = new IntArraySet(Math.min(ending.size(), starting.size()));
-    for (Int2ReferenceMap.Entry<DebugLocalInfo> entry : ending.int2ReferenceEntrySet()) {
+    for (Entry<DebugLocalInfo> entry : ending.int2ReferenceEntrySet()) {
       if (starting.get(entry.getIntKey()) == entry.getValue()) {
         unneeded.add(entry.getIntKey());
       }
@@ -366,18 +511,6 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
     // block, any exits directly targeting that.
     return instruction != block.exit()
         || (instruction.isGoto() && instruction.asGoto().getTarget() == code.getNormalExitBlock());
-  }
-
-  private boolean verifyLocalsEqual(
-      ImmutableMap<Integer, DebugLocalInfo> a, Map<Integer, DebugLocalInfo> b) {
-    int size = 0;
-    for (Map.Entry<Integer, DebugLocalInfo> entry : b.entrySet()) {
-      if (entry.getValue() != null) {
-        assert a.get(entry.getKey()) == entry.getValue();
-        ++size;
-      }
-    }
-    return a.size() == size;
   }
 
   private void clearState() {
@@ -1128,7 +1261,7 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
           map.add(operandRegister);
         }
       }
-      for (Entry<Integer> entry : Multisets.copyHighestCountFirst(map).entrySet()) {
+      for (Multiset.Entry<Integer> entry : Multisets.copyHighestCountFirst(map).entrySet()) {
         int register = entry.getElement();
         if (tryHint(unhandledInterval, registerConstraint, freePositions, needsRegisterPair,
             register)) {
@@ -1454,7 +1587,7 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
         newActive.add(splitChild);
         // If the constant is split before its first actual use, mark the constant as being
         // spilled. That will allows us to remove it afterwards if it is rematerializable.
-        if (intervals.getValue().isConstant()
+        if (intervals.getValue().isConstNumber()
             && intervals.getStart() == intervals.getValue().definition.getNumber()
             && intervals.getUses().size() == 1) {
           intervals.setSpilled(true);
@@ -1465,7 +1598,9 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
             LiveIntervals splitOfSplit = splitChild.splitBefore(splitChild.getFirstUse());
             splitOfSplit.setRegister(intervals.getRegister());
             inactive.add(splitOfSplit);
-          } else if (intervals.getValue().isConstant()) {
+          } else if (intervals.getValue().isConstNumber()) {
+            // TODO(ager): Do this for all constants. Currently we only rematerialize const
+            // number and therefore we only do it for numbers at this point.
             splitRangesForSpilledConstant(splitChild, registerNumber);
           } else if (intervals.isArgumentInterval()) {
             splitRangesForSpilledArgument(splitChild);
@@ -1494,7 +1629,7 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
     // Spilling a non-pinned, non-rematerializable value. We use the value in the spill
     // register for as long as possible to avoid further moves.
     assert spilled.isSpilled();
-    assert !spilled.getValue().isConstant();
+    assert !spilled.getValue().isConstNumber();
     assert !spilled.isLinked() || spilled.isArgumentInterval();
     if (spilled.isArgumentInterval()) {
       registerNumber = Constants.U16BIT_MAX;
@@ -1525,7 +1660,7 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
     // spill we are running low on registers and this constant should get out of the way
     // as much as possible.
     assert spilled.isSpilled();
-    assert spilled.getValue().isConstant();
+    assert spilled.getValue().isConstNumber();
     assert !spilled.isLinked() || spilled.isArgumentInterval();
     // Do not split range if constant is reused by one of the eleven following instruction.
     int maxGapSize = 11 * INSTRUCTION_NUMBER_DELTA;
@@ -1664,14 +1799,8 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
         for (Phi phi : successor.getPhis()) {
           LiveIntervals toIntervals = phi.getLiveIntervals().getSplitCovering(toInstruction);
           Value operand = phi.getOperand(predIndex);
-          LiveIntervals fromIntervals = operand.getLiveIntervals();
-          if (operand.isPhi() && operand != phi && successor.getPhis().contains(operand)) {
-            // If the input to this phi is another phi in this block we want the value after
-            // merging which is the value for that phi at the from instruction.
-            fromIntervals = fromIntervals.getSplitCovering(fromInstruction);
-          } else {
-            fromIntervals = fromIntervals.getSplitCovering(fromInstruction);
-          }
+          LiveIntervals fromIntervals =
+              operand.getLiveIntervals().getSplitCovering(fromInstruction);
           if (fromIntervals != toIntervals && !toIntervals.isArgumentInterval()) {
             assert block.getSuccessors().size() == 1;
             spillMoves.addPhiMove(fromInstruction - 1, toIntervals, fromIntervals);
@@ -1828,7 +1957,7 @@ public class LinearScanRegisterAllocator implements RegisterAllocator {
           // For instructions that define values which have no use create a live range covering
           // the instruction. This will typically be instructions that can have side effects even
           // if their output is not used.
-          if (definition.numberOfAllUsers() == 0) {
+          if (!definition.isUsed()) {
             addLiveRange(definition, block, instruction.getNumber() + INSTRUCTION_NUMBER_DELTA);
           }
           live.remove(definition);

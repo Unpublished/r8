@@ -11,17 +11,17 @@ import com.android.tools.r8.ir.conversion.IRBuilder;
 import com.android.tools.r8.naming.ClassNameMapper;
 import java.nio.ShortBuffer;
 
-abstract class Format22t extends Base2Format {
+public abstract class Format22t extends Base2Format {
 
-  public final int A;
-  public final int B;
-  public final /* offset */ int CCCC;
+  public final byte A;
+  public final byte B;
+  public /* offset */ short CCCC;
 
   // vB | vA | op | +CCCC
   Format22t(int high, BytecodeStream stream) {
     super(stream);
-    A = high & 0xf;
-    B = (high >> 4) & 0xf;
+    A = (byte) (high & 0xf);
+    B = (byte) ((high >> 4) & 0xf);
     CCCC = readSigned16BitValue(stream);
   }
 
@@ -29,9 +29,9 @@ abstract class Format22t extends Base2Format {
     assert 0 <= register1 && register1 <= Constants.U4BIT_MAX;
     assert 0 <= register2 && register2 <= Constants.U4BIT_MAX;
     assert Short.MIN_VALUE <= offset && offset <= Short.MAX_VALUE;
-    A = register1;
-    B = register2;
-    CCCC = offset;
+    A = (byte) register1;
+    B = (byte) register2;
+    CCCC = (short) offset;
   }
 
   public void write(ShortBuffer dest, ObjectToOffsetMapping mapping) {
@@ -66,7 +66,7 @@ abstract class Format22t extends Base2Format {
   }
 
   public String toString(ClassNameMapper naming) {
-    return formatString("v" + A + ", v" + B + ", +" + CCCC + " (" + (getOffset() + CCCC) + ")");
+    return formatString("v" + A + ", v" + B + ", " + formatRelativeOffset(CCCC));
   }
 
   public String toSmaliString(ClassNameMapper naming) {

@@ -10,8 +10,10 @@ import com.android.tools.r8.graph.DexField;
 import com.android.tools.r8.graph.DexString;
 import com.android.tools.r8.graph.DexType;
 import com.android.tools.r8.shaking.RootSetBuilder.RootSet;
+import com.android.tools.r8.utils.InternalOptions;
+import com.android.tools.r8.utils.Timing;
+import com.google.common.collect.ImmutableList;
 import java.util.IdentityHashMap;
-import java.util.List;
 import java.util.Map;
 
 class FieldNameMinifier {
@@ -19,28 +21,34 @@ class FieldNameMinifier {
   private final AppInfoWithSubtyping appInfo;
   private final RootSet rootSet;
   private final Map<DexField, DexString> renaming = new IdentityHashMap<>();
-  private final List<String> dictionary;
+  private final ImmutableList<String> dictionary;
   private final Map<DexType, NamingState<DexType>> states = new IdentityHashMap<>();
 
-  FieldNameMinifier(AppInfoWithSubtyping appInfo, RootSet rootSet, List<String> dictionary) {
+  FieldNameMinifier(AppInfoWithSubtyping appInfo, RootSet rootSet, InternalOptions options) {
     this.appInfo = appInfo;
     this.rootSet = rootSet;
-    this.dictionary = dictionary;
+    this.dictionary = options.proguardConfiguration.getObfuscationDictionary();
   }
 
-  Map<DexField, DexString> computeRenaming() {
+  Map<DexField, DexString> computeRenaming(Timing timing) {
     NamingState<DexType> rootState = NamingState.createRoot(appInfo.dexItemFactory, dictionary);
     // Reserve names in all classes first. We do this in subtyping order so we do not
     // shadow a reserved field in subclasses. While there is no concept of virtual field
     // dispatch in Java, field resolution still traverses the super type chain and external
     // code might use a subtype to reference the field.
+    timing.begin("reserve-classes");
     reserveNamesInSubtypes(appInfo.dexItemFactory.objectType, rootState);
+    timing.end();
     // Next, reserve field names in interfaces. These should only be static.
+    timing.begin("reserve-interfaces");
     DexType.forAllInterfaces(appInfo.dexItemFactory,
         iface -> reserveNamesInSubtypes(iface, rootState));
+    timing.end();
     // Now rename the rest.
+    timing.begin("rename");
     renameFieldsInSubtypes(appInfo.dexItemFactory.objectType);
     DexType.forAllInterfaces(appInfo.dexItemFactory, this::renameFieldsInSubtypes);
+    timing.end();
     return renaming;
   }
 

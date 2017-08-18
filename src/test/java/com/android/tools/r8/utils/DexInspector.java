@@ -267,6 +267,10 @@ public class DexInspector {
 
     public abstract MethodSubject method(String returnType, String name, List<String> parameters);
 
+    public MethodSubject clinit() {
+      return method("void", "<clinit>", ImmutableList.of());
+    }
+
     public MethodSubject method(MethodSignature signature) {
       return method(signature.type, signature.name, ImmutableList.copyOf(signature.parameters));
     }
@@ -517,6 +521,8 @@ public class DexInspector {
 
     public abstract boolean isBridge();
 
+    public abstract boolean isClassInitializer();
+
     public abstract DexEncodedMethod getMethod();
 
     public Iterator<InstructionSubject> iterateInstructions() {
@@ -570,6 +576,11 @@ public class DexInspector {
 
     @Override
     public boolean isBridge() {
+      return false;
+    }
+
+    @Override
+    public boolean isClassInitializer() {
       return false;
     }
 
@@ -637,6 +648,11 @@ public class DexInspector {
     @Override
     public boolean isBridge() {
       return dexMethod.accessFlags.isBridge();
+    }
+
+    @Override
+    public boolean isClassInitializer() {
+      return dexMethod.isClassInitializer();
     }
 
     @Override

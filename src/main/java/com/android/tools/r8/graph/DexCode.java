@@ -64,6 +64,11 @@ public class DexCode extends Code {
   }
 
   @Override
+  public int estimatedSizeForInlining() {
+    return instructions.length;
+  }
+
+  @Override
   public DexCode asDexCode() {
     return this;
   }
@@ -170,6 +175,9 @@ public class DexCode extends Code {
 
   public String toString(DexEncodedMethod method, ClassNameMapper naming) {
     StringBuilder builder = new StringBuilder();
+    if (method != null) {
+      builder.append(method.toSourceString()).append("\n");
+    }
     builder.append("registers: ").append(registerSize);
     builder.append(", inputs: ").append(incomingRegisterSize);
     builder.append(", outputs: ").append(outgoingRegisterSize).append("\n");
@@ -185,7 +193,7 @@ public class DexCode extends Code {
     int instructionNumber = 0;
     for (Instruction insn : instructions) {
       while (debugInfo != null && debugInfo.address == insn.getOffset()) {
-        builder.append("      ").append(debugInfo).append("\n");
+        builder.append("         ").append(debugInfo.toString(false)).append("\n");
         debugInfo = debugInfoIterator.hasNext() ? debugInfoIterator.next() : null;
       }
       StringUtils.appendLeftPadded(builder, Integer.toString(instructionNumber++), 5);
@@ -306,7 +314,7 @@ public class DexCode extends Code {
 
     public static final int NO_INDEX = -1;
 
-    private final int handlerOffset;
+    public final int handlerOffset;
     public /* offset */ int startAddress;
     public /* offset */ int instructionCount;
     public int handlerIndex;
@@ -345,9 +353,9 @@ public class DexCode extends Code {
 
     public String toString() {
       return "["
-          + startAddress
+          + StringUtils.hexString(startAddress, 2)
           + " .. "
-          + (startAddress + instructionCount - 1)
+          + StringUtils.hexString(startAddress + instructionCount - 1, 2)
           + "] -> "
           + handlerIndex;
     }
@@ -370,7 +378,7 @@ public class DexCode extends Code {
     public static final int NO_HANDLER = -1;
 
     public final TypeAddrPair[] pairs;
-    public /* offset */ int catchAllAddr;
+    public final /* offset */ int catchAllAddr;
 
     public TryHandler(TypeAddrPair[] pairs, int catchAllAddr) {
       this.pairs = pairs;
@@ -412,12 +420,12 @@ public class DexCode extends Code {
         builder.append("       ");
         builder.append(pair.type);
         builder.append(" -> ");
-        builder.append(pair.addr);
+        builder.append(StringUtils.hexString(pair.addr, 2));
         builder.append("\n");
       }
       if (catchAllAddr != NO_HANDLER) {
         builder.append("       default -> ");
-        builder.append(catchAllAddr);
+        builder.append(StringUtils.hexString(catchAllAddr, 2));
         builder.append("\n");
       }
       builder.append("     ]");

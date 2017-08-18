@@ -4,11 +4,14 @@
 package com.android.tools.r8.maindexlist;
 
 import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import com.android.tools.r8.CompilationException;
+import com.android.tools.r8.CompilationMode;
 import com.android.tools.r8.D8Command;
 import com.android.tools.r8.R8Command;
 import com.android.tools.r8.TestBase;
@@ -16,6 +19,7 @@ import com.android.tools.r8.ToolHelper;
 import com.android.tools.r8.dex.ApplicationWriter;
 import com.android.tools.r8.dex.Constants;
 import com.android.tools.r8.errors.CompilationError;
+import com.android.tools.r8.errors.MainDexError;
 import com.android.tools.r8.errors.Unreachable;
 import com.android.tools.r8.graph.AppInfoWithSubtyping;
 import com.android.tools.r8.graph.Code;
@@ -58,10 +62,14 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 import org.junit.BeforeClass;
 import org.junit.ClassRule;
 import org.junit.Rule;
@@ -121,6 +129,10 @@ public class MainDexListTests extends TestBase {
     return generatedApplicationsFolder.getRoot().toPath().resolve("many-classes-stereo.zip");
   }
 
+  private static Path getManyClassesForceMultiDexAppPath() {
+    return generatedApplicationsFolder.getRoot().toPath().resolve("many-classes-stereo-forced.zip");
+  }
+
   @Rule
   public ExpectedException thrown = ExpectedException.none();
 
@@ -146,8 +158,16 @@ public class MainDexListTests extends TestBase {
 
   @Test
   public void cannotFitBothIntoMainDex() throws Throwable {
-    thrown.expect(CompilationError.class);
-    verifyMainDexContains(TWO_LARGE_CLASSES, getTwoLargeClassesAppPath(), false);
+    try {
+      verifyMainDexContains(TWO_LARGE_CLASSES, getTwoLargeClassesAppPath(), false);
+      fail("Expect to fail, for there are too many classes for the main-dex list.");
+    } catch (CompilationError e) {
+      // Make sure {@link MonoDexDistributor} was _not_ used.
+      assertFalse(e.getMessage().contains("single dex file"));
+      // Make sure what exceeds the limit is the number of methods.
+      assertTrue(e.getMessage().contains("# methods: "
+          + String.valueOf(TWO_LARGE_CLASSES.size() * MAX_METHOD_COUNT)));
+    }
   }
 
   @Test
@@ -179,8 +199,16 @@ public class MainDexListTests extends TestBase {
 
   @Test
   public void cannotFitAllIntoMainDex() throws Throwable {
-    thrown.expect(CompilationError.class);
-    verifyMainDexContains(MANY_CLASSES, getManyClassesMultiDexAppPath(), false);
+    try {
+      verifyMainDexContains(MANY_CLASSES, getManyClassesMultiDexAppPath(), false);
+      fail("Expect to fail, for there are too many classes for the main-dex list.");
+    } catch (CompilationError e) {
+      // Make sure {@link MonoDexDistributor} was _not_ used.
+      assertFalse(e.getMessage().contains("single dex file"));
+      // Make sure what exceeds the limit is the number of methods.
+      assertTrue(e.getMessage().contains("# methods: "
+          + String.valueOf(MANY_CLASSES_COUNT * MANY_CLASSES_MULTI_DEX_METHODS_PER_CLASS)));
+    }
   }
 
   @Test
@@ -195,7 +223,9 @@ public class MainDexListTests extends TestBase {
     FileUtils.writeTextFile(mainDexList, list);
     Set<DexType> types = MainDexList.parse(mainDexList, factory);
     for (String entry : list) {
-      assertTrue(types.contains(factory.createType("L" + entry.replace(".class", "") + ";")));
+      DexType type = factory.createType("L" + entry.replace(".class", "") + ";");
+      assertTrue(types.contains(type));
+      assertSame(type, MainDexList.parse(entry, factory));
     }
   }
 
@@ -208,34 +238,118 @@ public class MainDexListTests extends TestBase {
     MainDexList.parse(mainDexList, factory);
   }
 
+  private Path runD8WithMainDexList(
+      CompilationMode mode, Path input, List<String> mainDexClasses, boolean useFile)
+      throws Exception {
+    Path testDir = temp.newFolder().toPath();
+    Path listFile = testDir.resolve("main-dex-list.txt");
+    if (mainDexClasses != null && useFile) {
+      FileUtils.writeTextFile(
+          listFile,
+          mainDexClasses
+              .stream()
+              .map(clazz -> clazz.replace('.', '/') + ".class")
+              .collect(Collectors.toList()));
+    }
+
+    D8Command.Builder builder = D8Command.builder()
+        .addProgramFiles(input)
+        .setMode(mode)
+        .setOutputPath(testDir);
+    if (mainDexClasses != null) {
+      if (useFile) {
+        builder.addMainDexListFiles(listFile);
+      } else {
+        builder.addMainDexClasses(mainDexClasses);
+      }
+    }
+    ToolHelper.runD8(builder.build());
+    return testDir;
+  }
+
+  private void runDeterministicTest(Path input, List<String> mainDexClasses, boolean allClasses)
+      throws Exception {
+    // Run test in debug and release mode for minimal vs. non-minimal main-dex.
+    for (CompilationMode mode : CompilationMode.values()) {
+
+      // Build with all different main dex lists.
+      Map<Path, String> testDirs = new HashMap<>();  // Map Path to test scenario.
+      if (allClasses) {
+        // If all classes are passed add a run without a main-dex list as well.
+        testDirs.put(
+            runD8WithMainDexList(mode, input, null, true),
+            mode.toString() + ": without a main-dex list");
+      }
+      testDirs.put(
+          runD8WithMainDexList(mode, input, mainDexClasses, true),
+          mode.toString() + ": main-dex list files");
+      testDirs.put(
+          runD8WithMainDexList(mode, input, mainDexClasses, false),
+          mode.toString() + ": main-dex classes");
+      if (mainDexClasses != null) {
+        testDirs.put(
+            runD8WithMainDexList(mode, input, Lists.reverse(mainDexClasses), true),
+            mode.toString() + ": main-dex list files (reversed)");
+        testDirs.put(
+            runD8WithMainDexList(mode, input, Lists.reverse(mainDexClasses), false),
+            mode.toString() + ": main-dex classes (reversed)");
+      }
+
+      byte[] ref = null;
+      byte[] ref2 = null;
+      for (Path testDir : testDirs.keySet()) {
+        Path primaryDexFile = testDir.resolve(FileUtils.DEFAULT_DEX_FILENAME);
+        Path secondaryDexFile = testDir.resolve("classes2.dex");
+        assertTrue(Files.exists(primaryDexFile));
+        boolean hasSecondaryDexFile = !allClasses && mode == CompilationMode.DEBUG;
+        assertEquals(hasSecondaryDexFile, Files.exists(testDir.resolve(secondaryDexFile)));
+        byte[] content = Files.readAllBytes(primaryDexFile);
+        if (ref == null) {
+          ref = content;
+        } else {
+          assertArrayEquals("primary: " + testDirs.get(testDir), ref, content);
+        }
+        if (hasSecondaryDexFile) {
+          content = Files.readAllBytes(primaryDexFile);
+          if (ref2 == null) {
+            ref2 = content;
+          } else {
+            assertArrayEquals("secondary: " + testDirs.get(testDir), ref2, content);
+          }
+        }
+      }
+    }
+  }
+
   @Test
-  public void checkDeterminism() throws Exception {
+  public void deterministicTest() throws Exception {
     // Synthesize a dex containing a few empty classes including some in the default package.
-    // Everything can fit easaly in a single dex file.
-    String[] classes = {
-        "A",
-        "B",
-        "C",
-        "D",
-        "E",
-        "F",
-        "A1",
-        "A2",
-        "A3",
-        "A4",
-        "A5",
-        "maindexlist/A",
-        "maindexlist/B",
-        "maindexlist/C",
-        "maindexlist/D",
-        "maindexlist/E",
-        "maindexlist/F",
-        "maindexlist/A1",
-        "maindexlist/A2",
-        "maindexlist/A3",
-        "maindexlist/A4",
-        "maindexlist/A5"
-    };
+    // Everything can fit easily in a single dex file.
+    ImmutableList<String> classes = new ImmutableList.Builder<String>()
+        .add("A")
+        .add("B")
+        .add("C")
+        .add("D")
+        .add("E")
+        .add("F")
+        .add("A1")
+        .add("A2")
+        .add("A3")
+        .add("A4")
+        .add("A5")
+        .add("maindexlist.A")
+        .add("maindexlist.B")
+        .add("maindexlist.C")
+        .add("maindexlist.D")
+        .add("maindexlist.E")
+        .add("maindexlist.F")
+        .add("maindexlist.A1")
+        .add("maindexlist.A2")
+        .add("maindexlist.A3")
+        .add("maindexlist.A4")
+        .add("maindexlist.A5")
+        .build();
+
     JasminBuilder jasminBuilder = new JasminBuilder();
     for (String name : classes) {
       jasminBuilder.addClass(name);
@@ -243,76 +357,58 @@ public class MainDexListTests extends TestBase {
     Path input = temp.newFolder().toPath().resolve("input.zip");
     ToolHelper.runR8(jasminBuilder.build()).writeToZip(input, OutputMode.Indexed);
 
-    // Prepare different main dex lists.
-    ArrayList<Path> mainLists = new ArrayList<>();
-    // Lets first without a main dex list.
-    mainLists.add(null);
+    // Test with empty main dex list.
+    runDeterministicTest(input, null, true);
 
-    // List with all classes.
-    List<String> mainList = new ArrayList<>();
-    for (int i = 0; i < classes.length; i++) {
-      mainList.add(classes[i] + ".class");
-    }
-    addMainListFile(mainLists, mainList);
+    // Test with main-dex list with all classes.
+    runDeterministicTest(input, classes, true);
 
-    // Full list in reverse order
-    addMainListFile(mainLists, Lists.reverse(mainList));
+    // Test with main-dex list with first and second half of the classes.
+    List<List<String>> partitions = Lists.partition(classes, classes.size() / 2);
+    runDeterministicTest(input, partitions.get(0), false);
+    runDeterministicTest(input, partitions.get(1), false);
 
-    // Partial list without first entries (those in default package).
-    mainList.clear();
-    for (int i = classes.length / 2; i < classes.length; i++) {
-      mainList.add(classes[i] + ".class");
-    }
-    addMainListFile(mainLists, mainList);
-
-    // Same in reverese order
-    addMainListFile(mainLists, Lists.reverse(mainList));
-
-    // Mixed partial list.
-    mainList.clear();
-    for (int i = 0; i < classes.length; i += 2) {
-      mainList.add(classes[i] + ".class");
-    }
-    addMainListFile(mainLists, mainList);
-
-    // Another different mixed partial list.
-    mainList.clear();
-    for (int i = 1; i < classes.length; i += 2) {
-      mainList.add(classes[i] + ".class");
-    }
-    addMainListFile(mainLists, mainList);
-
-    // Build with all main dex lists.
-    Path tmp = temp.getRoot().toPath();
-    for (int i = 0; i < mainLists.size(); i++) {
-      Path out = tmp.resolve(String.valueOf(i));
-      Files.createDirectories(out);
-      D8Command.Builder builder = D8Command.builder()
-          .addProgramFiles(input)
-          .setOutputPath(out);
-      if (mainLists.get(i) != null) {
-        builder.setMainDexListFile(mainLists.get(i));
-      }
-      ToolHelper.runD8(builder.build());
-    }
-
-    // Check: no secondary dex and resulting dex is always the same.
-    assertFalse(Files.exists(tmp.resolve(String.valueOf(0)).resolve("classes2.dex")));
-    byte[] ref = Files.readAllBytes(
-        tmp.resolve(String.valueOf(0)).resolve(FileUtils.DEFAULT_DEX_FILENAME));
-    for (int i = 1; i < mainLists.size(); i++) {
-      assertFalse(Files.exists(tmp.resolve(String.valueOf(i)).resolve("classes2.dex")));
-      byte[] checked = Files.readAllBytes(
-          tmp.resolve(String.valueOf(i)).resolve(FileUtils.DEFAULT_DEX_FILENAME));
-      assertArrayEquals(ref, checked);
-    }
+    // Test with main-dex list with every second of the classes.
+    runDeterministicTest(input,
+        IntStream.range(0, classes.size())
+            .filter(n -> n % 2 == 0)
+            .mapToObj(classes::get)
+            .collect(Collectors.toList()), false);
+    runDeterministicTest(input,
+        IntStream.range(0, classes.size())
+            .filter(n -> n % 2 == 1)
+            .mapToObj(classes::get)
+            .collect(Collectors.toList()), false);
   }
 
-  private void addMainListFile(ArrayList<Path> mainLists, List<String> content)
-      throws IOException {
-    Path listFile = temp.newFile().toPath();
-    FileUtils.writeTextFile(listFile, content);
-    mainLists.add(listFile);
+  @Test
+  public void checkIntermediateMultiDex() throws Exception {
+    // Generates an application with many classes, every even in one package and every odd in
+    // another. Add enough methods so the application cannot fit into one dex file.
+    // Notice that this one allows multidex while using lower API.
+    AndroidApp generated = generateApplication(
+        MANY_CLASSES, Constants.ANDROID_K_API, true, MANY_CLASSES_MULTI_DEX_METHODS_PER_CLASS);
+    generated.write(getManyClassesForceMultiDexAppPath(), OutputMode.Indexed);
+    // Make sure the generated app indeed has multiple dex files.
+    assertTrue(generated.getDexProgramResources().size() > 1);
+  }
+
+  @Test
+  public void testMultiDexFailDueToMinApi() throws Exception {
+    // Generates an application with many classes, every even in one package and every odd in
+    // another. Add enough methods so the application cannot fit into one dex file.
+    // Notice that this one fails due to the min API.
+    try {
+      generateApplication(
+          MANY_CLASSES, Constants.ANDROID_K_API, false, MANY_CLASSES_MULTI_DEX_METHODS_PER_CLASS);
+      fail("Expect to fail, for there are many classes while multidex is not enabled.");
+    } catch (MainDexError e) {
+      // Make sure {@link MonoDexDistributor} was used.
+      assertTrue(e.getMessage().contains("single dex file"));
+      // Make sure what exceeds the limit is the number of methods.
+      assertTrue(e.getMessage().contains("# methods: "
+          + String.valueOf(MANY_CLASSES_COUNT * MANY_CLASSES_MULTI_DEX_METHODS_PER_CLASS)));
+    }
   }
 
   private static String typeToEntry(String type) {
@@ -347,8 +443,16 @@ public class MainDexListTests extends TestBase {
     }
   }
 
+  private enum MultiDexTestMode {
+    SINGLE_FILE,
+    MULTIPLE_FILES,
+    STRINGS,
+    FILES_AND_STRINGS
+  }
+
   private void doVerifyMainDexContains(
-      List<String> mainDex, Path app, boolean singleDexApp, boolean minimalMainDex)
+      List<String> mainDex, Path app, boolean singleDexApp, boolean minimalMainDex,
+      MultiDexTestMode testMode)
       throws IOException, CompilationException, ExecutionException, ProguardRuleParserException {
     AndroidApp originalApp = AndroidApp.fromProgramFiles(app);
     DexInspector originalInspector = new DexInspector(originalApp);
@@ -357,18 +461,58 @@ public class MainDexListTests extends TestBase {
           originalInspector.clazz(clazz).isPresent());
     }
     Path outDir = temp.newFolder().toPath();
-    Path mainDexList = temp.newFile().toPath();
-    FileUtils.writeTextFile(mainDexList, ListUtils.map(mainDex, MainDexListTests::typeToEntry));
-    R8Command command =
+    R8Command.Builder builder =
         R8Command.builder()
             .addProgramFiles(app)
-            .setMainDexListFile(mainDexList)
-            .setMinimalMainDex(minimalMainDex)
+            .setMode(minimalMainDex && mainDex.size() > 0
+                ? CompilationMode.DEBUG : CompilationMode.RELEASE)
             .setOutputPath(outDir)
             .setTreeShaking(false)
-            .setMinification(false)
-            .build();
-    ToolHelper.runR8(command);
+            .setMinification(false);
+
+    switch (testMode) {
+      case SINGLE_FILE:
+        Path mainDexList = temp.newFile().toPath();
+        FileUtils.writeTextFile(mainDexList, ListUtils.map(mainDex, MainDexListTests::typeToEntry));
+        builder.addMainDexListFiles(mainDexList);
+        break;
+      case MULTIPLE_FILES: {
+        // Partion the main dex list into several files.
+        List<List<String>> partitions = Lists.partition(mainDex, Math.max(mainDex.size() / 3, 1));
+        List<Path> mainDexListFiles = new ArrayList<>();
+        for (List<String> partition : partitions) {
+          Path partialMainDexList = temp.newFile().toPath();
+          FileUtils.writeTextFile(partialMainDexList,
+              ListUtils.map(partition, MainDexListTests::typeToEntry));
+          mainDexListFiles.add(partialMainDexList);
+        }
+        builder.addMainDexListFiles(mainDexListFiles);
+        break;
+      }
+      case STRINGS:
+        builder.addMainDexClasses(mainDex);
+        break;
+      case FILES_AND_STRINGS: {
+        // Partion the main dex list add some parts through files and the other parts using strings.
+        List<List<String>> partitions = Lists.partition(mainDex, Math.max(mainDex.size() / 3, 1));
+        List<Path> mainDexListFiles = new ArrayList<>();
+        for (int i = 0; i < partitions.size(); i++) {
+          List<String> partition = partitions.get(i);
+          if (i % 2 == 0) {
+            Path partialMainDexList = temp.newFile().toPath();
+            FileUtils.writeTextFile(partialMainDexList,
+                ListUtils.map(partition, MainDexListTests::typeToEntry));
+            mainDexListFiles.add(partialMainDexList);
+          } else {
+            builder.addMainDexClasses(mainDex);
+          }
+        }
+        builder.addMainDexListFiles(mainDexListFiles);
+        break;
+      }
+    }
+
+    ToolHelper.runR8(builder.build());
     if (!singleDexApp && !minimalMainDex) {
       assertTrue("Output run only produced one dex file.",
           1 < Files.list(outDir).filter(FileUtils::isDexFile).count());
@@ -380,22 +524,31 @@ public class MainDexListTests extends TestBase {
         failedToFindClassInExpectedFile(outDir, clazz);
       }
     }
-    if (minimalMainDex) {
+    if (minimalMainDex && mainDex.size() > 0) {
       inspector.forAllClasses(clazz -> assertMainDexClass(clazz, mainDex));
     }
   }
 
   private void verifyMainDexContains(List<String> mainDex, Path app, boolean singleDexApp)
       throws Throwable {
-    doVerifyMainDexContains(mainDex, app, singleDexApp, false);
-    doVerifyMainDexContains(mainDex, app, singleDexApp, true);
+    for (MultiDexTestMode multiDexTestMode : MultiDexTestMode.values()) {
+      doVerifyMainDexContains(mainDex, app, singleDexApp, false, multiDexTestMode);
+      doVerifyMainDexContains(mainDex, app, singleDexApp, true, multiDexTestMode);
+    }
   }
 
   public static AndroidApp generateApplication(List<String> classes, int minApi, int methodCount)
       throws IOException, ExecutionException {
+    return generateApplication(classes, minApi, false, methodCount);
+  }
+
+  private static AndroidApp generateApplication(
+      List<String> classes, int minApi, boolean intermediate, int methodCount)
+      throws IOException, ExecutionException {
     Timing timing = new Timing("MainDexListTests");
     InternalOptions options = new InternalOptions();
     options.minApiLevel = minApi;
+    options.intermediate = intermediate;
     DexItemFactory factory = options.itemFactory;
     DexApplication.Builder builder = new DexApplication.Builder(factory, timing);
     for (String clazz : classes) {
@@ -439,8 +592,8 @@ public class MainDexListTests extends TestBase {
     }
     DexApplication application = builder.build();
     AppInfoWithSubtyping appInfo = new AppInfoWithSubtyping(application);
-    ApplicationWriter writer =
-        new ApplicationWriter(application, appInfo, options, null, NamingLens.getIdentityLens(), null);
+    ApplicationWriter writer = new ApplicationWriter(
+        application, appInfo, options, null, null, NamingLens.getIdentityLens(), null);
     ExecutorService executor = ThreadUtils.getExecutorService(options);
     try {
       return writer.write(null, executor);

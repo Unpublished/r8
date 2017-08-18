@@ -30,7 +30,8 @@ public class TreePruner {
     this.application = application;
     this.appInfo = appInfo;
     this.options = options;
-    this.usagePrinter = options.printUsage ? new UsagePrinter() : UsagePrinter.DONT_PRINT;
+    this.usagePrinter = options.proguardConfiguration.isPrintUsage()
+        ? new UsagePrinter() : UsagePrinter.DONT_PRINT;
   }
 
   public DexApplication run() throws IOException {
@@ -83,10 +84,10 @@ public class TreePruner {
         // The class is used and must be kept. Remove the unused fields and methods from
         // the class.
         usagePrinter.visiting(clazz);
-        clazz.directMethods = reachableMethods(clazz.directMethods(), clazz);
-        clazz.virtualMethods = reachableMethods(clazz.virtualMethods(), clazz);
-        clazz.instanceFields = reachableFields(clazz.instanceFields());
-        clazz.staticFields = reachableFields(clazz.staticFields());
+        clazz.setDirectMethods(reachableMethods(clazz.directMethods(), clazz));
+        clazz.setVirtualMethods(reachableMethods(clazz.virtualMethods(), clazz));
+        clazz.setInstanceFields(reachableFields(clazz.instanceFields()));
+        clazz.setStaticFields(reachableFields(clazz.staticFields()));
         usagePrinter.visited();
       }
     }
@@ -113,7 +114,7 @@ public class TreePruner {
   }
 
   private boolean isDefaultConstructor(DexEncodedMethod method) {
-    return method.accessFlags.isConstructor() && !method.accessFlags.isStatic()
+    return method.isInstanceInitializer()
         && method.method.proto.parameters.isEmpty();
   }
 

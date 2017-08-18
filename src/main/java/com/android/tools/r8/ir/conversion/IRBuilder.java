@@ -7,6 +7,7 @@ package com.android.tools.r8.ir.conversion;
 import com.android.tools.r8.dex.Constants;
 import com.android.tools.r8.errors.CompilationError;
 import com.android.tools.r8.errors.InternalCompilerError;
+import com.android.tools.r8.errors.InvalidDebugInfoException;
 import com.android.tools.r8.graph.DebugLocalInfo;
 import com.android.tools.r8.graph.DexCallSite;
 import com.android.tools.r8.graph.DexEncodedMethod;
@@ -86,6 +87,8 @@ import it.unimi.dsi.fastutil.ints.IntArraySet;
 import it.unimi.dsi.fastutil.ints.IntIterator;
 import it.unimi.dsi.fastutil.ints.IntList;
 import it.unimi.dsi.fastutil.ints.IntSet;
+import it.unimi.dsi.fastutil.longs.Long2ObjectArrayMap;
+import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -241,11 +244,11 @@ public class IRBuilder {
   private BasicBlock currentBlock = null;
 
   // Mappings for canonicalizing constants of a given type at IR construction time.
-  private Map<Long, ConstNumber> intConstants = new HashMap<>();
-  private Map<Long, ConstNumber> longConstants = new HashMap<>();
-  private Map<Long, ConstNumber> floatConstants = new HashMap<>();
-  private Map<Long, ConstNumber> doubleConstants = new HashMap<>();
-  private Map<Long, ConstNumber> nullConstants = new HashMap<>();
+  private Long2ObjectMap<ConstNumber> intConstants = new Long2ObjectArrayMap<>();
+  private Long2ObjectMap<ConstNumber> longConstants = new Long2ObjectArrayMap<>();
+  private Long2ObjectMap<ConstNumber> floatConstants = new Long2ObjectArrayMap<>();
+  private Long2ObjectMap<ConstNumber> doubleConstants = new Long2ObjectArrayMap<>();
+  private Long2ObjectMap<ConstNumber> nullConstants = new Long2ObjectArrayMap<>();
 
   private List<BasicBlock> exitBlocks = new ArrayList<>();
   private BasicBlock normalExitBlock;
@@ -669,7 +672,7 @@ public class IRBuilder {
   // to disable constant canonicalization in debug builds to make sure we have separate values
   // for separate locals.
   private void canonicalizeAndAddConst(
-      ConstType type, int dest, long value, Map<Long, ConstNumber> table) {
+      ConstType type, int dest, long value, Long2ObjectMap<ConstNumber> table) {
     ConstNumber existing = table.get(value);
     if (existing != null) {
       currentBlock.writeCurrentDefinition(dest, existing.outValue(), ThrowingInfo.NO_THROW);
@@ -1392,7 +1395,8 @@ public class IRBuilder {
     Value in2 = readNumericRegister(right, type);
     Value out = writeNumericRegister(dest, type, ThrowingInfo.NO_THROW);
     Instruction instruction;
-    if (in2.isConstant() && in2.getConstInstruction().asConstNumber().isIntegerNegativeOne(type)) {
+    if (in2.isConstNumber() &&
+        in2.getConstInstruction().asConstNumber().isIntegerNegativeOne(type)) {
       instruction = new Not(type, out, in1);
     } else {
       instruction = new Xor(type, out, in1, in2);
@@ -1431,7 +1435,11 @@ public class IRBuilder {
     DebugLocalInfo local = getCurrentLocal(register);
     Value value = readRegister(register, currentBlock, EdgeType.NON_EDGE, type, local);
     // Check that any information about a current-local is consistent with the read.
-    assert local == null || value.getLocalInfo() == local || value.isUninitializedLocal();
+    if (local != null && value.getLocalInfo() != local && !value.isUninitializedLocal()) {
+      throw new InvalidDebugInfoException(
+          "Attempt to read local " + local
+              + " but no local information was associated with the value being read.");
+    }
     // Check that any local information on the value is actually visible.
     // If this assert triggers, the probable cause is that we end up reading an SSA value
     // after it should have been ended on a fallthrough from a conditional jump or a trivial-phi
@@ -1977,6 +1985,16 @@ public class IRBuilder {
     if (currentDebugPosition != null) {
       DebugPosition position = currentDebugPosition;
       currentDebugPosition = null;
+      if (!currentBlock.getInstructions().isEmpty()) {
+        MoveException move = currentBlock.getInstructions().getLast().asMoveException();
+        if (move != null && move.getPosition() == null) {
+          // Set the position on the move-exception instruction.
+          // ART/DX associates the move-exception pc with the catch-declaration line.
+          // See debug.ExceptionTest.testStepOnCatch().
+          move.setPosition(position);
+          return;
+        }
+      }
       addInstruction(position);
     }
   }

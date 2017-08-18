@@ -9,11 +9,20 @@ import static org.junit.Assert.fail;
 
 import com.android.tools.r8.dex.ApplicationReader;
 import com.android.tools.r8.dex.Constants;
+import com.android.tools.r8.graph.AppInfoWithSubtyping;
 import com.android.tools.r8.graph.DexApplication;
+import com.android.tools.r8.graph.DexItemFactory;
+import com.android.tools.r8.shaking.ProguardConfiguration;
+import com.android.tools.r8.shaking.ProguardConfigurationParser;
+import com.android.tools.r8.shaking.ProguardConfigurationRule;
 import com.android.tools.r8.shaking.ProguardRuleParserException;
+import com.android.tools.r8.shaking.RootSetBuilder;
+import com.android.tools.r8.shaking.RootSetBuilder.RootSet;
 import com.android.tools.r8.utils.AndroidApp;
 import com.android.tools.r8.utils.InternalOptions;
 import com.android.tools.r8.utils.ListUtils;
+import com.android.tools.r8.utils.StringUtils;
+import com.android.tools.r8.utils.ThreadUtils;
 import com.android.tools.r8.utils.Timing;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -53,10 +62,10 @@ public class ToolHelper {
   public static final String EXAMPLES_ANDROID_O_BUILD_DIR = BUILD_DIR + "test/examplesAndroidO/";
   public static final String SMALI_BUILD_DIR = BUILD_DIR + "test/smali/";
 
-  public static final String LINE_SEPARATOR = System.getProperty("line.separator");
+  public static final String LINE_SEPARATOR = StringUtils.LINE_SEPARATOR;
 
   private static final String ANDROID_JAR_PATTERN = "third_party/android_jar/lib-v%d/android.jar";
-  private static final int DEFAULT_MIN_SDK = 14;
+  private static final int DEFAULT_MIN_SDK = Constants.ANDROID_I_API;
 
   public enum DexVm {
     ART_4_4_4("4.4.4"),
@@ -305,10 +314,22 @@ public class ToolHelper {
     }
   }
 
+  static class RetainedTemporaryFolder extends TemporaryFolder {
+    RetainedTemporaryFolder(java.io.File parentFolder) {
+      super(parentFolder);
+    }
+    protected void after() {} // instead of remove, do nothing
+  }
+
   // For non-Linux platforms create the temporary directory in the repository root to simplify
   // running Art in a docker container
   public static TemporaryFolder getTemporaryFolderForTest() {
-    return new TemporaryFolder(ToolHelper.isLinux() ? null : Paths.get("build", "tmp").toFile());
+    String tmpDir = System.getProperty("test_dir");
+    if (tmpDir == null) {
+      return new TemporaryFolder(ToolHelper.isLinux() ? null : Paths.get("build", "tmp").toFile());
+    } else {
+      return new RetainedTemporaryFolder(new java.io.File(tmpDir));
+    }
   }
 
   public static String getArtBinary() {
@@ -340,8 +361,8 @@ public class ToolHelper {
   }
 
   // Returns if the passed in vm to use is the default.
-  public static boolean isDefaultDexVm() {
-    return getDexVm() == DexVm.ART_DEFAULT;
+  public static boolean isDefaultDexVm(DexVm dexVm) {
+    return dexVm == DexVm.ART_DEFAULT;
   }
 
   public static DexVm getDexVm() {
@@ -420,6 +441,17 @@ public class ToolHelper {
         .read();
   }
 
+  public static ProguardConfiguration loadProguardConfiguration(
+      DexItemFactory factory, List<Path> configPaths)
+      throws IOException, ProguardRuleParserException {
+    if (configPaths.isEmpty()) {
+      return ProguardConfiguration.defaultConfiguration(factory);
+    }
+    ProguardConfigurationParser parser = new ProguardConfigurationParser(factory);
+    parser.parse(configPaths);
+    return parser.getConfig();
+  }
+
   public static R8Command.Builder prepareR8CommandBuilder(AndroidApp app) {
     return R8Command.builder(app);
   }
@@ -485,6 +517,14 @@ public class ToolHelper {
             .setOutputPath(Paths.get(out))
             .setIgnoreMissingClasses(true)
             .build());
+  }
+
+  public static DexApplication optimizeWithR8(
+      DexApplication application,
+      AppInfoWithSubtyping appInfo,
+      InternalOptions options)
+      throws ProguardRuleParserException, ExecutionException, IOException {
+    return R8.optimize(application, appInfo, options);
   }
 
   public static AndroidApp runD8(AndroidApp app) throws CompilationException, IOException {
@@ -631,18 +671,36 @@ public class ToolHelper {
       Consumer<ArtCommandBuilder> extras,
       DexVm version)
       throws IOException {
-    // Run art on original.
-    for (String file : files1) {
-      assertTrue("file1 " + file + " must exists", Files.exists(Paths.get(file)));
+    return checkArtOutputIdentical(
+        version,
+        mainClass,
+        extras,
+        ImmutableList.of(ListUtils.map(files1, Paths::get), ListUtils.map(files2, Paths::get)));
+  }
+
+  public static String checkArtOutputIdentical(
+      DexVm version,
+      String mainClass,
+      Consumer<ArtCommandBuilder> extras,
+      Collection<Collection<Path>> programs)
+      throws IOException {
+    for (Collection<Path> program : programs) {
+      for (Path path : program) {
+        assertTrue("File " + path + " must exist", Files.exists(path));
+      }
     }
-    String output1 = ToolHelper.runArtNoVerificationErrors(files1, mainClass, extras, version);
-    // Run art on R8 processed version.
-    for (String file : files2) {
-      assertTrue("file2 " + file + " must exists", Files.exists(Paths.get(file)));
+    String output = null;
+    for (Collection<Path> program : programs) {
+      String result =
+          ToolHelper.runArtNoVerificationErrors(
+              ListUtils.map(program, Path::toString), mainClass, extras, version);
+      if (output != null) {
+        assertEquals(output, result);
+      } else {
+        output = result;
+      }
     }
-    String output2 = ToolHelper.runArtNoVerificationErrors(files2, mainClass, extras, version);
-    assertEquals(output1, output2);
-    return output1;
+    return output;
   }
 
   public static void runDex2Oat(Path file, Path outFile) throws IOException {

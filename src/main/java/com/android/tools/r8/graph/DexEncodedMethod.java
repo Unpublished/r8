@@ -3,9 +3,10 @@
 // BSD-style license that can be found in the LICENSE file.
 package com.android.tools.r8.graph;
 
-import static com.android.tools.r8.graph.DexEncodedMethod.CompilationState.PROCESSED_INLINING_CANDIDATE_PACKAGE_PRIVATE;
-import static com.android.tools.r8.graph.DexEncodedMethod.CompilationState.PROCESSED_INLINING_CANDIDATE_PRIVATE;
-import static com.android.tools.r8.graph.DexEncodedMethod.CompilationState.PROCESSED_INLINING_CANDIDATE_PUBLIC;
+import static com.android.tools.r8.graph.DexEncodedMethod.CompilationState.PROCESSED_INLINING_CANDIDATE_ANY;
+import static com.android.tools.r8.graph.DexEncodedMethod.CompilationState.PROCESSED_INLINING_CANDIDATE_SAME_CLASS;
+import static com.android.tools.r8.graph.DexEncodedMethod.CompilationState.PROCESSED_INLINING_CANDIDATE_SAME_PACKAGE;
+import static com.android.tools.r8.graph.DexEncodedMethod.CompilationState.PROCESSED_INLINING_CANDIDATE_SUBCLASS;
 import static com.android.tools.r8.graph.DexEncodedMethod.CompilationState.PROCESSED_NOT_INLINING_CANDIDATE;
 
 import com.android.tools.r8.code.Const;
@@ -35,17 +36,40 @@ import com.android.tools.r8.utils.InternalOptions;
 
 public class DexEncodedMethod extends KeyedDexItem<DexMethod> {
 
-  public enum CompilationState
-
-  {
+  /**
+   * Encodes the processing state of a method.
+   * <p>
+   * We also use this enum to encode whether and if under what constraints a method may be
+   * inlined.
+   */
+  public enum CompilationState {
+    /**
+     * Has not been processed, yet.
+     */
     NOT_PROCESSED,
+    /**
+     * Has been processed but cannot be inlined due to instructions that are not supported.
+     */
     PROCESSED_NOT_INLINING_CANDIDATE,
-    // Code only contains instructions that access public entities.
-    PROCESSED_INLINING_CANDIDATE_PUBLIC,
-    // Code only contains instructions that access public and package private entities.
-    PROCESSED_INLINING_CANDIDATE_PACKAGE_PRIVATE,
-    // Code also contains instructions that access public entities.
-    PROCESSED_INLINING_CANDIDATE_PRIVATE,
+    /**
+     * Code only contains instructions that access public entities and can this be inlined
+     * into any context.
+     */
+    PROCESSED_INLINING_CANDIDATE_ANY,
+    /**
+     * Code also contains instructions that access protected entities that reside in a differnt
+     * package and hence require subclass relationship to be visible.
+     */
+    PROCESSED_INLINING_CANDIDATE_SUBCLASS,
+    /**
+     * Code contains instructions that reference package private entities or protected entities
+     * from the same package.
+     */
+    PROCESSED_INLINING_CANDIDATE_SAME_PACKAGE,
+    /**
+     * Code contains instructions that reference private entities.
+     */
+    PROCESSED_INLINING_CANDIDATE_SAME_CLASS,
   }
 
   public static final DexEncodedMethod[] EMPTY_ARRAY = new DexEncodedMethod[]{};
@@ -74,51 +98,51 @@ public class DexEncodedMethod extends KeyedDexItem<DexMethod> {
     return compilationState != CompilationState.NOT_PROCESSED;
   }
 
-  public boolean cannotInline() {
-    return compilationState == CompilationState.NOT_PROCESSED
-        || compilationState == CompilationState.PROCESSED_NOT_INLINING_CANDIDATE;
+  public boolean isInstanceInitializer() {
+    return accessFlags.isConstructor() && !accessFlags.isStatic();
   }
 
-  public boolean isInliningCandidate(DexEncodedMethod container, boolean alwaysInline) {
-    if (container.accessFlags.isStatic() && container.accessFlags.isConstructor()) {
+  public boolean isClassInitializer() {
+    return accessFlags.isConstructor() && accessFlags.isStatic();
+  }
+
+  public boolean isInliningCandidate(DexEncodedMethod container, boolean alwaysInline,
+      AppInfoWithSubtyping appInfo) {
+    if (isClassInitializer()) {
       // This will probably never happen but never inline a class initializer.
       return false;
     }
     if (alwaysInline) {
-      // Only inline constructor iff holder classes are equal.
-      if (!accessFlags.isStatic() && accessFlags.isConstructor()) {
-        return container.method.getHolder() == method.getHolder();
-      }
       return true;
     }
     switch (compilationState) {
-      case PROCESSED_INLINING_CANDIDATE_PUBLIC:
+      case PROCESSED_INLINING_CANDIDATE_ANY:
         return true;
-      case PROCESSED_INLINING_CANDIDATE_PACKAGE_PRIVATE:
+      case PROCESSED_INLINING_CANDIDATE_SUBCLASS:
+        return container.method.getHolder().isSubtypeOf(method.getHolder(), appInfo);
+      case PROCESSED_INLINING_CANDIDATE_SAME_PACKAGE:
         return container.method.getHolder().isSamePackage(method.getHolder());
-      // TODO(bak): Expand check for package private access:
-      case PROCESSED_INLINING_CANDIDATE_PRIVATE:
+      case PROCESSED_INLINING_CANDIDATE_SAME_CLASS:
         return container.method.getHolder() == method.getHolder();
       default:
         return false;
     }
   }
 
-  public boolean isPublicInlining() {
-    return compilationState == PROCESSED_INLINING_CANDIDATE_PUBLIC;
-  }
-
   public boolean markProcessed(Constraint state) {
     CompilationState prevCompilationState = compilationState;
     switch (state) {
       case ALWAYS:
-        compilationState = PROCESSED_INLINING_CANDIDATE_PUBLIC;
+        compilationState = PROCESSED_INLINING_CANDIDATE_ANY;
+        break;
+      case SUBCLASS:
+        compilationState = PROCESSED_INLINING_CANDIDATE_SUBCLASS;
         break;
       case PACKAGE:
-        compilationState = PROCESSED_INLINING_CANDIDATE_PACKAGE_PRIVATE;
+        compilationState = PROCESSED_INLINING_CANDIDATE_SAME_PACKAGE;
         break;
-      case PRIVATE:
-        compilationState = PROCESSED_INLINING_CANDIDATE_PRIVATE;
+      case SAMECLASS:
+        compilationState = PROCESSED_INLINING_CANDIDATE_SAME_CLASS;
         break;
       case NEVER:
         compilationState = PROCESSED_NOT_INLINING_CANDIDATE;
@@ -144,15 +168,7 @@ public class DexEncodedMethod extends KeyedDexItem<DexMethod> {
   public void setCode(
       IRCode ir, RegisterAllocator registerAllocator, DexItemFactory dexItemFactory) {
     final DexBuilder builder = new DexBuilder(ir, registerAllocator, dexItemFactory);
-    code = builder.build(method.proto.parameters.values.length);
-  }
-
-  // Replaces the dex code in the method by setting code to result of compiling the IR.
-  public void setCode(IRCode ir, RegisterAllocator registerAllocator,
-      DexItemFactory dexItemFactory, DexString firstJumboString) {
-    final DexBuilder builder =
-        new DexBuilder(ir, registerAllocator, dexItemFactory, firstJumboString);
-    code = builder.build(method.proto.parameters.values.length);
+    code = builder.build(method.getArity());
   }
 
   public String toString() {
@@ -180,6 +196,10 @@ public class DexEncodedMethod extends KeyedDexItem<DexMethod> {
 
   public Code getCode() {
     return code;
+  }
+
+  public void setDexCode(DexCode code) {
+    this.code = code;
   }
 
   public void removeCode() {
@@ -282,10 +302,10 @@ public class DexEncodedMethod extends KeyedDexItem<DexMethod> {
             itemFactory.stringType),
             itemFactory.constructorMethodName);
     DexCode code;
-    if (accessFlags.isConstructor() && !accessFlags.isStatic()) {
+    if (isInstanceInitializer()) {
       // The Java VM Spec requires that a constructor calls an initializer from the super class
       // or another constructor from the current class. For simplicity we do the latter by just
-      // calling outself. This is ok, as the constructor always throws before the recursive call.
+      // calling ourself. This is ok, as the constructor always throws before the recursive call.
       code = generateCodeFromTemplate(3, 2, new ConstStringJumbo(0, tag),
           new ConstStringJumbo(1, message),
           new InvokeStatic(2, logMethod, 0, 1, 0, 0, 0),
@@ -330,6 +350,11 @@ public class DexEncodedMethod extends KeyedDexItem<DexMethod> {
 
   public DexEncodedMethod toForwardingMethod(DexClass holder, DexItemFactory itemFactory) {
     assert accessFlags.isPublic();
+    // Clear the final flag, as this method is now overwritten. Do this before creating the builder
+    // for the forwarding method, as the forwarding method will copy the access flags from this,
+    // and if different forwarding methods are created in different subclasses the first could be
+    // final.
+    accessFlags.unsetFinal();
     DexMethod newMethod = itemFactory.createMethod(holder.type, method.proto, method.name);
     Invoke.Type type = accessFlags.isStatic() ? Invoke.Type.STATIC : Invoke.Type.SUPER;
     Builder builder = builder(this);
@@ -356,7 +381,6 @@ public class DexEncodedMethod extends KeyedDexItem<DexMethod> {
           }));
     }
     builder.accessFlags.setSynthetic();
-    accessFlags.unsetFinal();
     return builder.build();
   }
 
@@ -380,6 +404,10 @@ public class DexEncodedMethod extends KeyedDexItem<DexMethod> {
       }
       code.registerReachableDefinitions(registry);
     }
+  }
+
+  public static int slowCompare(DexEncodedMethod m1, DexEncodedMethod m2) {
+    return m1.method.slowCompareTo(m2.method);
   }
 
   public static class OptimizationInfo {

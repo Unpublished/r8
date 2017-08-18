@@ -71,11 +71,15 @@ public class PrintUsageTest {
             .setOutputPath(out)
             .addProgramFiles(Paths.get(programFile))
             .addProguardConfigurationFiles(ListUtils.map(keepRulesFiles, Paths::get))
+            .addProguardConfigurationConsumer(builder -> {
+              builder.setPrintUsage(true);
+              builder.setPrintUsageFile(out.resolve(test + PRINT_USAGE_FILE_SUFFIX));
+            })
             .addLibraryFiles(Paths.get(ANDROID_JAR))
             .build();
     ToolHelper.runR8(command, options -> {
-      options.printUsage = true;
-      options.printUsageFile = out.resolve(test + PRINT_USAGE_FILE_SUFFIX);
+      // Disable inlining to make this test not depend on inlining decisions.
+      options.inlineAccessors = false;
     });
   }
 
@@ -151,10 +155,12 @@ public class PrintUsageTest {
   }
 
   private static void inspectShaking9(PrintUsageInspector inspector) {
-    assertFalse(inspector.clazz("shaking9.Superclass").isPresent());
+    Optional<ClassSubject> superClass = inspector.clazz("shaking9.Superclass");
+    assertFalse(superClass.isPresent());
     Optional<ClassSubject> subClass = inspector.clazz("shaking9.Subclass");
     assertTrue(subClass.isPresent());
     assertTrue(subClass.get().method("void", "aMethod", Collections.emptyList()));
+    assertFalse(subClass.get().method("void", "<init>", Collections.emptyList()));
   }
 
   private static void inspectShaking12(PrintUsageInspector inspector) {

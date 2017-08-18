@@ -10,7 +10,7 @@ import java.nio.ShortBuffer;
 
 abstract class Format30t extends Base3Format {
 
-  public final /* offset */ int AAAAAAAA;
+  public /* offset */ int AAAAAAAA;
 
   // øø | op | AAAAlo | AAAAhi
   Format30t(int high, BytecodeStream stream) {
@@ -39,7 +39,7 @@ abstract class Format30t extends Base3Format {
   }
 
   public String toString(ClassNameMapper naming) {
-    return formatString("" + AAAAAAAA);
+    return formatString(formatOffset(AAAAAAAA));
   }
 
   public String toSmaliString(ClassNameMapper naming) {

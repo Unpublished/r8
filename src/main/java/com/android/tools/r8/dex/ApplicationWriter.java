@@ -3,9 +3,6 @@
 // BSD-style license that can be found in the LICENSE file.
 package com.android.tools.r8.dex;
 
-import com.android.tools.r8.dex.VirtualFile.FilePerClassDistributor;
-import com.android.tools.r8.dex.VirtualFile.FillFilesDistributor;
-import com.android.tools.r8.dex.VirtualFile.PackageMapDistributor;
 import com.android.tools.r8.errors.CompilationError;
 import com.android.tools.r8.graph.AppInfo;
 import com.android.tools.r8.graph.DexAnnotation;
@@ -17,6 +14,7 @@ import com.android.tools.r8.graph.DexCode;
 import com.android.tools.r8.graph.DexDebugInfo;
 import com.android.tools.r8.graph.DexEncodedArray;
 import com.android.tools.r8.graph.DexProgramClass;
+import com.android.tools.r8.graph.DexString;
 import com.android.tools.r8.graph.DexType;
 import com.android.tools.r8.graph.DexTypeList;
 import com.android.tools.r8.graph.DexValue;
@@ -46,6 +44,7 @@ public class ApplicationWriter {
   public final NamingLens namingLens;
   public final byte[] proguardSeedsData;
   public final InternalOptions options;
+  public DexString markerString;
 
   private static class SortAnnotations extends MixedSectionCollection {
 
@@ -108,6 +107,7 @@ public class ApplicationWriter {
       DexApplication application,
       AppInfo appInfo,
       InternalOptions options,
+      Marker marker,
       byte[] deadCode,
       NamingLens namingLens,
       byte[] proguardSeedsData) {
@@ -116,6 +116,9 @@ public class ApplicationWriter {
     this.appInfo = appInfo;
     assert options != null;
     this.options = options;
+    this.markerString = (marker == null)
+        ? null
+        : application.dexItemFactory.createString(marker.toString());
     this.deadCode = deadCode;
     this.namingLens = namingLens;
     this.proguardSeedsData = proguardSeedsData;
@@ -126,6 +129,8 @@ public class ApplicationWriter {
     application.timing.begin("DexApplication.write");
     try {
       application.dexItemFactory.sort(namingLens);
+      assert this.markerString == null || application.dexItemFactory.extractMarker() != null;
+
       SortAnnotations sortAnnotations = new SortAnnotations();
       application.classes().forEach((clazz) -> clazz.addDependencies(sortAnnotations));
 
@@ -134,10 +139,10 @@ public class ApplicationWriter {
       if (options.outputMode == OutputMode.FilePerClass) {
         assert packageDistribution == null :
             "Cannot combine package distribution definition with file-per-class option.";
-        distributor = new FilePerClassDistributor(this);
-      } else if (options.minApiLevel < Constants.ANDROID_L_API
-            && options.mainDexKeepRules.isEmpty()
-            && application.mainDexList.isEmpty()) {
+        distributor = new VirtualFile.FilePerClassDistributor(this);
+      } else if (!options.canUseMultidex()
+          && options.mainDexKeepRules.isEmpty()
+          && application.mainDexList.isEmpty()) {
         if (packageDistribution != null) {
           throw new CompilationError("Cannot apply package distribution. Multidex is not"
               + " supported with API level " + options.minApiLevel +"."
@@ -148,9 +153,10 @@ public class ApplicationWriter {
       } else if (packageDistribution != null) {
         assert !options.minimalMainDex :
             "Cannot combine package distribution definition with minimal-main-dex option.";
-        distributor = new PackageMapDistributor(this, packageDistribution, executorService);
+        distributor =
+            new VirtualFile.PackageMapDistributor(this, packageDistribution, executorService);
       } else {
-        distributor = new FillFilesDistributor(this, options.minimalMainDex);
+        distributor = new VirtualFile.FillFilesDistributor(this, options.minimalMainDex);
       }
       Map<Integer, VirtualFile> newFiles = distributor.run();
 
@@ -160,6 +166,7 @@ public class ApplicationWriter {
       for (int i = 0; i < newFiles.size(); i++) {
         VirtualFile newFile = newFiles.get(i);
         assert newFile.getId() == i;
+        assert !newFile.isEmpty();
         if (!newFile.isEmpty()) {
           dexDataFutures.put(newFile, executorService.submit(() -> writeDexFile(newFile)));
         }
@@ -188,7 +195,7 @@ public class ApplicationWriter {
       }
       byte[] mainDexList = writeMainDexList();
       if (mainDexList != null) {
-        builder.setMainDexListData(mainDexList);
+        builder.setMainDexListOutputData(mainDexList);
       }
       return builder.build();
     } finally {

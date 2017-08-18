@@ -11,23 +11,23 @@ import com.android.tools.r8.ir.conversion.IRBuilder;
 import com.android.tools.r8.naming.ClassNameMapper;
 import java.nio.ShortBuffer;
 
-abstract class Format21t extends Base2Format {
+public abstract class Format21t extends Base2Format {
 
-  public final int AA;
-  public final /* offset */ int BBBB;
+  public final short AA;
+  public /* offset */ short BBBB;
 
   // AA | op | +BBBB
   Format21t(int high, BytecodeStream stream) {
     super(stream);
-    AA = high;
+    AA = (short) high;
     BBBB = readSigned16BitValue(stream);
   }
 
   Format21t(int register, int offset) {
     assert Short.MIN_VALUE <= offset && offset <= Short.MAX_VALUE;
     assert 0 <= register && register <= Constants.U8BIT_MAX;
-    AA = register;
-    BBBB = offset;
+    AA = (short) register;
+    BBBB = (short) offset;
   }
 
   public void write(ShortBuffer dest, ObjectToOffsetMapping mapping) {
@@ -62,7 +62,7 @@ abstract class Format21t extends Base2Format {
   }
 
   public String toString(ClassNameMapper naming) {
-    return formatString("v" + AA + ", +" + BBBB + " (" + (getOffset() + BBBB) + ")");
+    return formatString("v" + AA + ", " + formatRelativeOffset(BBBB));
   }
 
   public String toSmaliString(ClassNameMapper naming) {

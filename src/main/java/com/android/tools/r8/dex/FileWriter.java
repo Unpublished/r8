@@ -5,8 +5,6 @@ package com.android.tools.r8.dex;
 
 import static com.android.tools.r8.utils.LebUtils.sizeAsUleb128;
 
-import com.google.common.collect.Sets;
-
 import com.android.tools.r8.code.Instruction;
 import com.android.tools.r8.errors.CompilationError;
 import com.android.tools.r8.graph.AppInfo;
@@ -43,7 +41,6 @@ import com.android.tools.r8.graph.KeyedDexItem;
 import com.android.tools.r8.graph.ObjectToOffsetMapping;
 import com.android.tools.r8.graph.PresortedComparable;
 import com.android.tools.r8.graph.ProgramClassVisitor;
-import com.android.tools.r8.ir.conversion.IRConverter;
 import com.android.tools.r8.logging.Log;
 import com.android.tools.r8.naming.ClassNameMapper;
 import com.android.tools.r8.naming.MemberNaming.MethodSignature;
@@ -51,12 +48,11 @@ import com.android.tools.r8.naming.MemberNaming.Signature;
 import com.android.tools.r8.naming.NamingLens;
 import com.android.tools.r8.utils.InternalOptions;
 import com.android.tools.r8.utils.LebUtils;
-
+import com.google.common.collect.Sets;
 import it.unimi.dsi.fastutil.objects.Object2IntLinkedOpenHashMap;
 import it.unimi.dsi.fastutil.objects.Object2IntMap;
 import it.unimi.dsi.fastutil.objects.Reference2IntLinkedOpenHashMap;
 import it.unimi.dsi.fastutil.objects.Reference2IntMap;
-
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -156,14 +152,16 @@ public class FileWriter {
     return this;
   }
 
-  private void rewriteCodeWithJumboStrings(IRConverter converter, DexEncodedMethod method) {
+  private void rewriteCodeWithJumboStrings(DexEncodedMethod method) {
     if (method.getCode() == null) {
       return;
     }
     DexCode code = method.getCode().asDexCode();
     if (code.highestSortingString != null) {
       if (mapping.getOffsetFor(code.highestSortingString) > Constants.MAX_NON_JUMBO_INDEX) {
-        converter.processJumboStrings(method, mapping.getFirstJumboString());
+        JumboStringRewriter rewriter =
+            new JumboStringRewriter(method, mapping.getFirstJumboString(), options.itemFactory);
+        rewriter.rewrite();
       }
     }
   }
@@ -179,9 +177,8 @@ public class FileWriter {
       return this;
     }
     // At least one method needs a jumbo string.
-    IRConverter converter = new IRConverter(application, appInfo, options, false);
     for (DexProgramClass clazz : classes) {
-      clazz.forEachMethod(method -> rewriteCodeWithJumboStrings(converter, method));
+      clazz.forEachMethod(method -> rewriteCodeWithJumboStrings(method));
     }
     return this;
   }
@@ -256,10 +253,10 @@ public class FileWriter {
 
   private void sortClassData(Collection<DexProgramClass> classesWithData) {
     for (DexProgramClass clazz : classesWithData) {
-      sortEncodedFields(clazz.instanceFields);
-      sortEncodedFields(clazz.staticFields);
-      sortEncodedMethods(clazz.directMethods);
-      sortEncodedMethods(clazz.virtualMethods);
+      sortEncodedFields(clazz.instanceFields());
+      sortEncodedFields(clazz.staticFields());
+      sortEncodedMethods(clazz.directMethods());
+      sortEncodedMethods(clazz.virtualMethods());
     }
   }
 
@@ -297,7 +294,7 @@ public class FileWriter {
       }
 
     } else {
-      if (method.accessFlags.isConstructor()) {
+      if (method.isInstanceInitializer()) {
         throw new CompilationError(
             "Interface must not have constructors: " + method.method.toSourceString());
       }
