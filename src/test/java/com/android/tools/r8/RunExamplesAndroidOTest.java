@@ -109,6 +109,9 @@ public abstract class RunExamplesAndroidOTest<B> {
       if (compilationErrorExpected(testName)) {
         thrown.expect(CompilationError.class);
       }
+      if (minSdkErrorExpected(testName)) {
+        thrown.expect(ApiLevelException.class);
+      }
 
       String qualifiedMainClass = packageName + "." + mainClass;
       Path inputFile = Paths.get(EXAMPLE_DIR, packageName + JAR_EXTENSION);
@@ -152,8 +155,10 @@ public abstract class RunExamplesAndroidOTest<B> {
   }
 
   private static List<String> compilationErrorExpected =
-      ImmutableList.of(
-          "invokepolymorphic-error-due-to-min-sdk", "invokecustom-error-due-to-min-sdk");
+      ImmutableList.of("invokepolymorphic-error-due-to-min-sdk");
+
+  private static List<String> minSdkErrorExpected =
+      ImmutableList.of("invokecustom-error-due-to-min-sdk");
 
   private static Map<DexVm, List<String>> failsOn =
       ImmutableMap.of(
@@ -163,7 +168,8 @@ public abstract class RunExamplesAndroidOTest<B> {
               "repeat_annotations_new_api",
               // Dex version not supported
               "invokepolymorphic",
-              "invokecustom"
+              "invokecustom",
+              "invokecustom2"
           ),
           DexVm.ART_5_1_1, ImmutableList.of(
               // API not supported
@@ -171,7 +177,8 @@ public abstract class RunExamplesAndroidOTest<B> {
               "repeat_annotations_new_api",
               // Dex version not supported
               "invokepolymorphic",
-              "invokecustom"
+              "invokecustom",
+              "invokecustom2"
           ),
           DexVm.ART_6_0_1, ImmutableList.of(
               // API not supported
@@ -179,14 +186,16 @@ public abstract class RunExamplesAndroidOTest<B> {
               "repeat_annotations_new_api",
               // Dex version not supported
               "invokepolymorphic",
-              "invokecustom"
+              "invokecustom",
+              "invokecustom2"
           ),
           DexVm.ART_7_0_0, ImmutableList.of(
               // API not supported
               "paramnames",
               // Dex version not supported
               "invokepolymorphic",
-              "invokecustom"
+              "invokecustom",
+              "invokecustom2"
           ),
           DexVm.ART_DEFAULT, ImmutableList.of(
           )
@@ -211,9 +220,20 @@ public abstract class RunExamplesAndroidOTest<B> {
     return compilationErrorExpected.contains(testName);
   }
 
+  boolean minSdkErrorExpected(String testName) {
+    return minSdkErrorExpected.contains(testName);
+  }
+
   @Test
   public void invokeCustom() throws Throwable {
     test("invokecustom", "invokecustom", "InvokeCustom")
+        .withMinApiLevel(ANDROID_O_API)
+        .run();
+  }
+
+  @Test
+  public void invokeCustom2() throws Throwable {
+    test("invokecustom2", "invokecustom2", "InvokeCustom")
         .withMinApiLevel(ANDROID_O_API)
         .run();
   }

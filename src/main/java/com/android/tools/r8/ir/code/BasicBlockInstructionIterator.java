@@ -5,6 +5,7 @@
 package com.android.tools.r8.ir.code;
 
 import com.android.tools.r8.graph.DexType;
+import com.android.tools.r8.utils.IteratorUtils;
 import java.util.Iterator;
 import java.util.List;
 import java.util.ListIterator;
@@ -114,10 +115,6 @@ public class BasicBlockInstructionIterator implements InstructionIterator, Instr
     for (Value value : current.getDebugValues()) {
       value.removeDebugUser(current);
     }
-    Value previousLocalValue = current.getPreviousLocalValue();
-    if (previousLocalValue != null) {
-      previousLocalValue.removeDebugUser(current);
-    }
     listIterator.remove();
     current = null;
   }
@@ -166,15 +163,9 @@ public class BasicBlockInstructionIterator implements InstructionIterator, Instr
     }
   }
 
-  private BasicBlock peekPrevious(ListIterator<BasicBlock> blocksIterator) {
-    BasicBlock block = blocksIterator.previous();
-    blocksIterator.next();
-    return block;
-  }
-
   public BasicBlock split(IRCode code, ListIterator<BasicBlock> blocksIterator) {
     List<BasicBlock> blocks = code.blocks;
-    assert blocksIterator == null || peekPrevious(blocksIterator) == block;
+    assert blocksIterator == null || IteratorUtils.peekPrevious(blocksIterator) == block;
 
     int blockNumber = code.getHighestBlockNumber() + 1;
     BasicBlock newBlock;
@@ -209,6 +200,9 @@ public class BasicBlockInstructionIterator implements InstructionIterator, Instr
       blocks.add(blocks.indexOf(block) + 1, newBlock);
     } else {
       blocksIterator.add(newBlock);
+      // Ensure that calling remove() will remove the block just added.
+      blocksIterator.previous();
+      blocksIterator.next();
     }
 
     return newBlock;
@@ -217,7 +211,7 @@ public class BasicBlockInstructionIterator implements InstructionIterator, Instr
   public BasicBlock split(int instructions, IRCode code, ListIterator<BasicBlock> blocksIterator) {
     // Split at the current cursor position.
     BasicBlock newBlock = split(code, blocksIterator);
-    assert blocksIterator == null || peekPrevious(blocksIterator) == newBlock;
+    assert blocksIterator == null || IteratorUtils.peekPrevious(blocksIterator) == newBlock;
     // Skip the requested number of instructions and split again.
     InstructionListIterator iterator = newBlock.listIterator();
     for (int i = 0; i < instructions; i++) {
@@ -350,7 +344,7 @@ public class BasicBlockInstructionIterator implements InstructionIterator, Instr
     assert invoke.inValues().size() == arguments.size();
     for (int i = 0; i < invoke.inValues().size(); i++) {
       // TODO(zerny): Support inlining in --debug mode.
-      assert arguments.get(i).getDebugInfo() == null;
+      assert arguments.get(i).getLocalInfo() == null;
       if ((i == 0) && (downcast != null)) {
         Value invokeValue = invoke.inValues().get(0);
         Value receiverValue = arguments.get(0);

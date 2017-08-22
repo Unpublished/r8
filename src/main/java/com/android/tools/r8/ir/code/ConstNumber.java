@@ -33,10 +33,7 @@ public class ConstNumber extends ConstInstruction {
 
   public static ConstNumber copyOf(IRCode code, ConstNumber original) {
     Value newValue =
-        new Value(
-            code.valueNumberGenerator.next(),
-            original.outType(),
-            original.getDebugInfo());
+        new Value(code.valueNumberGenerator.next(), original.outType(), original.getLocalInfo());
     return new ConstNumber(original.type, newValue, original.getRawValue());
   }
 
@@ -117,6 +114,33 @@ public class ConstNumber extends ConstInstruction {
         builder.add(this, new ConstWide32(register, (int) value));
       } else {
         builder.add(this, new ConstWide(register, value));
+      }
+    }
+  }
+
+  // Estimated size of the resulting dex instruction in code units.
+  public static int estimatedDexSize(ConstType type, long value) {
+    if (MoveType.fromConstType(type) == MoveType.SINGLE) {
+      assert NumberUtils.is32Bit(value);
+      if (NumberUtils.is4Bit(value)) {
+        return Const4.SIZE;
+      } else if (NumberUtils.is16Bit(value)) {
+        return Const16.SIZE;
+      } else if ((value & 0x0000ffffL) == 0) {
+        return ConstHigh16.SIZE;
+      } else {
+        return Const.SIZE;
+      }
+    } else {
+      assert MoveType.fromConstType(type) == MoveType.WIDE;
+      if (NumberUtils.is16Bit(value)) {
+        return ConstWide16.SIZE;
+      } else if ((value & 0x0000ffffffffffffL) == 0) {
+        return ConstWideHigh16.SIZE;
+      } else if (NumberUtils.is32Bit(value)) {
+        return ConstWide32.SIZE;
+      } else {
+        return ConstWide.SIZE;
       }
     }
   }

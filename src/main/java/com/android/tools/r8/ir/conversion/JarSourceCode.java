@@ -4,6 +4,7 @@
 package com.android.tools.r8.ir.conversion;
 
 import com.android.tools.r8.dex.Constants;
+import com.android.tools.r8.errors.CompilationError;
 import com.android.tools.r8.errors.Unreachable;
 import com.android.tools.r8.graph.DebugLocalInfo;
 import com.android.tools.r8.graph.Descriptor;
@@ -31,6 +32,8 @@ import com.android.tools.r8.ir.conversion.IRBuilder.BlockInfo;
 import com.android.tools.r8.ir.conversion.JarState.Local;
 import com.android.tools.r8.ir.conversion.JarState.Slot;
 import com.android.tools.r8.logging.Log;
+import it.unimi.dsi.fastutil.ints.Int2ReferenceMap;
+import it.unimi.dsi.fastutil.ints.Int2ReferenceOpenHashMap;
 import it.unimi.dsi.fastutil.ints.Int2ReferenceSortedMap;
 import java.io.PrintWriter;
 import java.io.StringWriter;
@@ -257,34 +260,9 @@ public class JarSourceCode implements SourceCode {
 
   @Override
   public void buildPrelude(IRBuilder builder) {
-    Map<Integer, MoveType> initializedLocals = new HashMap<>(node.localVariables.size());
     // Record types for arguments.
-    recordArgumentTypes(initializedLocals);
-    // Add debug information for all locals at the initial label.
-    if (initialLabel != null) {
-      state.openLocals(initialLabel);
-    }
-    // Build the actual argument instructions now that type and debug information is known
-    // for arguments.
-    buildArgumentInstructions(builder);
-    if (isSynchronized()) {
-      generatingMethodSynchronization = true;
-      Type clazzType = Type.getType(clazz.toDescriptorString());
-      int monitorRegister;
-      if (isStatic()) {
-        // Load the class using a temporary on the stack.
-        monitorRegister = state.push(clazzType);
-        state.pop();
-        builder.addConstClass(monitorRegister, clazz);
-      } else {
-        assert actualArgumentCount() > 0;
-        // The object is stored in the first local.
-        monitorRegister = state.readLocal(0, clazzType).register;
-      }
-      // Build the monitor enter and save it for when generating exits later.
-      monitorEnter = builder.addMonitor(Monitor.Type.ENTER, monitorRegister);
-      generatingMethodSynchronization = false;
-    }
+    Int2ReferenceMap<MoveType> argumentLocals = recordArgumentTypes();
+    Int2ReferenceMap<MoveType> initializedLocals = new Int2ReferenceOpenHashMap<>(argumentLocals);
     // Initialize all non-argument locals to ensure safe insertion of debug-local instructions.
     for (Object o : node.localVariables) {
       LocalVariableNode local = (LocalVariableNode) o;
@@ -307,14 +285,43 @@ public class JarSourceCode implements SourceCode {
           break;
       }
       int localRegister = state.getLocalRegister(local.index, localType);
-      MoveType exitingLocalType = initializedLocals.get(localRegister);
-      assert exitingLocalType == null || exitingLocalType == moveType(localType);
-      if (exitingLocalType == null) {
+      MoveType existingLocalType = initializedLocals.get(localRegister);
+      assert existingLocalType == null || existingLocalType == moveType(localType);
+      if (existingLocalType == null) {
         int localRegister2 = state.writeLocal(local.index, localType);
         assert localRegister == localRegister2;
         initializedLocals.put(localRegister, moveType(localType));
         builder.addDebugUninitialized(localRegister, constType(localType));
       }
+    }
+    // Add debug information for all locals at the initial label.
+    if (initialLabel != null) {
+      for (Local local : state.openLocals(initialLabel)) {
+        if (!argumentLocals.containsKey(local.slot.register)) {
+          builder.addDebugLocalStart(local.slot.register, local.info);
+        }
+      }
+    }
+    // Build the actual argument instructions now that type and debug information is known
+    // for arguments.
+    buildArgumentInstructions(builder);
+    if (isSynchronized()) {
+      generatingMethodSynchronization = true;
+      Type clazzType = Type.getType(clazz.toDescriptorString());
+      int monitorRegister;
+      if (isStatic()) {
+        // Load the class using a temporary on the stack.
+        monitorRegister = state.push(clazzType);
+        state.pop();
+        builder.addConstClass(monitorRegister, clazz);
+      } else {
+        assert actualArgumentCount() > 0;
+        // The object is stored in the first local.
+        monitorRegister = state.readLocal(0, clazzType).register;
+      }
+      // Build the monitor enter and save it for when generating exits later.
+      monitorEnter = builder.addMonitor(Monitor.Type.ENTER, monitorRegister);
+      generatingMethodSynchronization = false;
     }
     computeBlockEntryJarStates(builder);
     state.setBuilding();
@@ -335,7 +342,9 @@ public class JarSourceCode implements SourceCode {
     }
   }
 
-  private void recordArgumentTypes(Map<Integer, MoveType> initializedLocals) {
+  private Int2ReferenceMap<MoveType> recordArgumentTypes() {
+    Int2ReferenceMap<MoveType> initializedLocals =
+        new Int2ReferenceOpenHashMap<>(node.localVariables.size());
     int argumentRegister = 0;
     if (!isStatic()) {
       Type thisType = Type.getType(clazz.descriptor.toString());
@@ -348,6 +357,7 @@ public class JarSourceCode implements SourceCode {
       argumentRegister += moveType.requiredRegisters();
       initializedLocals.put(register, moveType);
     }
+    return initializedLocals;
   }
 
   private void computeBlockEntryJarStates(IRBuilder builder) {
@@ -1726,9 +1736,10 @@ public class JarSourceCode implements SourceCode {
       state.push(Type.DOUBLE_TYPE);
     } else if (insn.cst instanceof Integer) {
       state.push(Type.INT_TYPE);
-    } else {
-      assert insn.cst instanceof Float;
+    } else if (insn.cst instanceof Float) {
       state.push(Type.FLOAT_TYPE);
+    } else {
+      throw new CompilationError("Unsupported constant: " + insn.cst.toString());
     }
   }
 
@@ -2631,7 +2642,7 @@ public class JarSourceCode implements SourceCode {
       case Opcodes.H_INVOKESPECIAL:
         DexType owner = application.getTypeFromName(handle.getOwner());
         if (owner == clazz || handle.getName().equals(Constants.INSTANCE_INITIALIZER_NAME)) {
-          return MethodHandleType.INVOKE_INSTANCE;
+          return MethodHandleType.INVOKE_DIRECT;
         } else {
           return MethodHandleType.INVOKE_SUPER;
         }
@@ -2712,10 +2723,11 @@ public class JarSourceCode implements SourceCode {
     } else if (insn.cst instanceof Integer) {
       int dest = state.push(Type.INT_TYPE);
       builder.addIntConst(dest, (Integer) insn.cst);
-    } else {
-      assert insn.cst instanceof Float;
+    } else if (insn.cst instanceof Float) {
       int dest = state.push(Type.FLOAT_TYPE);
       builder.addFloatConst(dest, Float.floatToRawIntBits((Float) insn.cst));
+    } else {
+      throw new CompilationError("Unsupported constant: " + insn.cst.toString());
     }
   }
 
