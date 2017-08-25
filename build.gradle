@@ -16,6 +16,8 @@ if (project.hasProperty('with_code_coverage')) {
     apply plugin: 'jacoco'
 }
 
+apply plugin: 'me.tatarka.retrolambda'
+
 repositories {
     maven { url 'https://maven.google.com' }
     mavenCentral()
@@ -29,6 +31,7 @@ buildscript {
     dependencies {
         classpath 'com.google.protobuf:protobuf-gradle-plugin:0.8.1'
         classpath 'com.github.jengelman.gradle.plugins:shadow:2.0.1'
+        classpath 'me.tatarka:gradle-retrolambda:3.7.0'
     }
 }
 

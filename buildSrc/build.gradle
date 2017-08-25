@@ -3,9 +3,19 @@
 // BSD-style license that can be found in the LICENSE file.
 apply plugin: 'java'
 apply plugin: 'idea'
+apply plugin: 'me.tatarka.retrolambda'
 
 repositories {
     mavenCentral()
+}
+
+buildscript {
+    repositories {
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'me.tatarka:gradle-retrolambda:3.7.0'
+    }
 }
 
 dependencies {
